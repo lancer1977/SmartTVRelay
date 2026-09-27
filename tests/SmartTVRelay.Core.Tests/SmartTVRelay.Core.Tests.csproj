@@ -13,4 +13,8 @@
   <ItemGroup>
     <ProjectReference Include="../../src/SmartTVRelay.Core/SmartTVRelay.Core.csproj" />
   </ItemGroup>
+
+  <ItemGroup>
+    <None Include="../../fixtures/samples/*.json" CopyToOutputDirectory="PreserveNewest" Link="samples/%(Filename)%(Extension)" />
+  </ItemGroup>
 </Project>

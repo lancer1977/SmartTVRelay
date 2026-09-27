@@ -1,0 +1,71 @@
+{
+  "name": "Program-Commercial-Program Transition",
+  "scope": "test-feed-1",
+  "emissions": [
+    {
+      "id": "a1b2c3d4-e5f6-47a8-b9c0-d1e2f3a4b5c6",
+      "at": "PT0S",
+      "value": "Program",
+      "sourceId": "detector-1",
+      "sourceKind": "heuristic",
+      "confidence": 0.95
+    },
+    {
+      "id": "b2c3d4e5-f6a7-48b9-c0d1-e2f3a4b5c6d7",
+      "at": "PT0S",
+      "value": "Program",
+      "sourceId": "detector-2",
+      "sourceKind": "heuristic",
+      "confidence": 0.92
+    },
+    {
+      "id": "c3d4e5f6-a7b8-49ca-d1e2-f3a4b5c6d7e8",
+      "at": "PT30S",
+      "value": "Commercial",
+      "sourceId": "detector-1",
+      "sourceKind": "heuristic",
+      "confidence": 0.96
+    },
+    {
+      "id": "d4e5f6a7-b8c9-4adb-e2f3-a4b5c6d7e8f9",
+      "at": "PT30S",
+      "value": "Commercial",
+      "sourceId": "detector-2",
+      "sourceKind": "heuristic",
+      "confidence": 0.94
+    },
+    {
+      "id": "e5f6a7b8-c9da-4bec-f3a4-b5c6d7e8f9a0",
+      "at": "PT90S",
+      "value": "Program",
+      "sourceId": "detector-1",
+      "sourceKind": "heuristic",
+      "confidence": 0.93
+    },
+    {
+      "id": "f6a7b8c9-daeb-4cfd-a4b5-c6d7e8f9a0b1",
+      "at": "PT90S",
+      "value": "Program",
+      "sourceId": "detector-2",
+      "sourceKind": "heuristic",
+      "confidence": 0.91
+    }
+  ],
+  "expectedTimeline": [
+    {
+      "start": "PT0S",
+      "end": "PT30S",
+      "expectedState": "Program"
+    },
+    {
+      "start": "PT30S",
+      "end": "PT90S",
+      "expectedState": "Commercial"
+    },
+    {
+      "start": "PT90S",
+      "end": "PT120S",
+      "expectedState": "Program"
+    }
+  ]
+}
