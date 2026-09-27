@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>SmartTVRelay.Core</RootNamespace>
+    <PackageId>SmartTVRelay.Core</PackageId>
+    <Description>SmartTVRelay perception and relay harness core.</Description>
+    <RepositoryUrl>https://github.com/lancer1977/SmartTVRelay</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/lancer1977/SmartTVRelay</PackageProjectUrl>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Observation.Core" Version="0.1.0-preview.1" />
+  </ItemGroup>
+</Project>

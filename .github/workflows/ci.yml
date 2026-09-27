@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - dev
+      - main
+
+jobs:
+  build:
+    # Matches AgenticGameHarness's runner strategy: self-hosted by default,
+    # hosted only when explicitly opted in via the HOSTED_CI_ENABLED repo
+    # variable. No self-hosted runner is registered for this repo yet, so
+    # HOSTED_CI_ENABLED=true is set for now; flip it off once one exists.
+    runs-on: ${{ fromJSON(vars.HOSTED_CI_ENABLED == 'true' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","pr-validation","smarttvrelay"]') }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Restore
+        run: dotnet restore SmartTVRelay.slnx
+      - name: Build
+        run: dotnet build SmartTVRelay.slnx -c Release
+      - name: Test
+        run: dotnet test SmartTVRelay.slnx -c Release
