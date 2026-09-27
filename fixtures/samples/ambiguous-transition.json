@@ -1,0 +1,71 @@
+{
+  "name": "Ambiguous Disputed Transition",
+  "scope": "test-feed-2",
+  "emissions": [
+    {
+      "id": "11111111-2222-3333-4444-555555555551",
+      "at": "PT0S",
+      "value": "Program",
+      "sourceId": "detector-1",
+      "sourceKind": "heuristic",
+      "confidence": 0.94
+    },
+    {
+      "id": "11111111-2222-3333-4444-555555555552",
+      "at": "PT0S",
+      "value": "Program",
+      "sourceId": "detector-2",
+      "sourceKind": "heuristic",
+      "confidence": 0.93
+    },
+    {
+      "id": "11111111-2222-3333-4444-555555555553",
+      "at": "PT10S",
+      "value": "Program",
+      "sourceId": "detector-1",
+      "sourceKind": "heuristic",
+      "confidence": 0.62
+    },
+    {
+      "id": "11111111-2222-3333-4444-555555555554",
+      "at": "PT10S",
+      "value": "Commercial",
+      "sourceId": "detector-2",
+      "sourceKind": "heuristic",
+      "confidence": 0.61
+    },
+    {
+      "id": "11111111-2222-3333-4444-555555555555",
+      "at": "PT15S",
+      "value": "Commercial",
+      "sourceId": "detector-1",
+      "sourceKind": "heuristic",
+      "confidence": 0.95
+    },
+    {
+      "id": "11111111-2222-3333-4444-555555555556",
+      "at": "PT15S",
+      "value": "Commercial",
+      "sourceId": "detector-2",
+      "sourceKind": "heuristic",
+      "confidence": 0.92
+    }
+  ],
+  "expectedTimeline": [
+    {
+      "start": "PT0S",
+      "end": "PT10S",
+      "expectedState": "Program"
+    },
+    {
+      "start": "PT10S",
+      "end": "PT15S",
+      "expectedState": "Transition"
+    },
+    {
+      "start": "PT15S",
+      "end": "PT30S",
+      "expectedState": "Commercial"
+    }
+  ]
+}
