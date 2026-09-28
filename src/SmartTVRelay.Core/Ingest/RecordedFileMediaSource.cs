@@ -15,7 +15,8 @@ public sealed class RecordedFileMediaSource : IBroadcastMediaSource
     /// <summary>
     /// Creates a <see cref="RecordedFileMediaSource"/> for a local MPEG-TS file.
     /// </summary>
-    /// <param name="sourceId">Unique identifier for this source; passed to detectors in their <see cref="SmartTVRelay.Core.Observation.Observation{T}"/> emissions. Must not be null, empty, or whitespace.</param>
+    /// <param name="sourceId">Unique identifier for this source; passed to detectors as the SourceId on
+    /// their Observation Core emissions. Must not be null, empty, or whitespace.</param>
     /// <param name="filePath">Absolute or relative path to an existing MPEG-TS file. Must exist on disk at construction time.</param>
     /// <param name="chunkSizeBytes">Number of bytes to read per chunk. Defaults to 65536 (64 KiB), a compromise between granularity and I/O overhead. The last chunk may be smaller.</param>
     /// <param name="chunkInterval">Artificial, deterministic interval between chunk timestamps. Defaults to 100 ms. Together with a zero-indexed chunk count N, yields <c>SourceTime = N * chunkInterval</c>, giving replay predictability independent of actual file-read timing.</param>
