@@ -20,8 +20,11 @@ public static class BroadcastFixtureLoader
     public static BroadcastFixture Load(string path)
     {
         var json = File.ReadAllText(path);
-        return JsonSerializer.Deserialize<BroadcastFixture>(json, Options)
+        var fixture = JsonSerializer.Deserialize<BroadcastFixture>(json, Options)
             ?? throw new InvalidDataException($"Fixture at '{path}' deserialized to null.");
+
+        BroadcastFixtureValidator.ValidateOrThrow(fixture);
+        return fixture;
     }
 
     private sealed class TimeSpanConverter : JsonConverter<TimeSpan>
