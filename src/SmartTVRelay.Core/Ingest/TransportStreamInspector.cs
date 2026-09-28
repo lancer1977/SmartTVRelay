@@ -85,17 +85,21 @@ public sealed class TransportStreamInspector
         {
             process.Start();
 
-            // Read stdout and stderr concurrently to avoid deadlock if either pipe buffer fills.
-            var (stdout, stderr) = await ReadProcessStreamsAsync(process, linkedCts.Token);
+            // Read stdout/stderr and await process exit all against the SAME linked token, so a
+            // hung ffprobe (never producing output, e.g. blocked reading its own input) is
+            // actually bounded by the configured timeout. The previous version read via the
+            // no-token ReadToEndAsync() overload and only checked the timeout with a *separate*,
+            // synchronous WaitForExit(int) called *after* those reads already returned -- which
+            // meant a process that hangs before writing anything to stdout/stderr was never
+            // bounded at all: confirmed via a live repro (a hung subprocess reading a FIFO with no
+            // writer) that the previous code took 5+ seconds to react to a 500ms configured
+            // timeout, and left the child process running afterward.
+            var stdoutTask = process.StandardOutput.ReadToEndAsync(linkedCts.Token);
+            var stderrTask = process.StandardError.ReadToEndAsync(linkedCts.Token);
 
-            // Wait for the process to complete, respecting the linked cancellation token.
-            var completed = process.WaitForExit((int)_timeout.TotalMilliseconds);
-            if (!completed)
-            {
-                // Process did not exit before timeout. Kill it.
-                process.Kill(entireProcessTree: true);
-                throw new OperationCanceledException($"ffprobe timed out after {_timeout.TotalSeconds} seconds while inspecting '{filePath}'");
-            }
+            await process.WaitForExitAsync(linkedCts.Token).ConfigureAwait(false);
+            var stdout = await stdoutTask.ConfigureAwait(false);
+            var stderr = await stderrTask.ConfigureAwait(false);
 
             if (process.ExitCode != 0)
             {
@@ -109,38 +113,15 @@ public sealed class TransportStreamInspector
         }
         catch (OperationCanceledException)
         {
-            // Ensure process is killed on cancellation.
+            // Ensure process is killed on cancellation OR timeout (both surface as
+            // OperationCanceledException via the linked token -- see class-level doc).
             if (!process.HasExited)
             {
                 process.Kill(entireProcessTree: true);
             }
+
             throw;
         }
-    }
-
-    private static async Task<(string stdout, string stderr)> ReadProcessStreamsAsync(
-        Process process,
-        CancellationToken cancellationToken)
-    {
-        var stdoutTask = process.StandardOutput.ReadToEndAsync();
-        var stderrTask = process.StandardError.ReadToEndAsync();
-
-        try
-        {
-            await Task.WhenAll(stdoutTask, stderrTask).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            // On cancellation, still drain the streams to avoid abandoned processes.
-            try
-            {
-                await Task.WhenAll(stdoutTask, stderrTask).ConfigureAwait(false);
-            }
-            catch { /* ignore */ }
-            throw;
-        }
-
-        return (stdoutTask.Result, stderrTask.Result);
     }
 
     private static TransportStreamMetadata ParseFfprobeOutput(string jsonOutput)

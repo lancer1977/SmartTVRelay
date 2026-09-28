@@ -292,6 +292,55 @@ public class TransportStreamInspectorTests
     }
 
     [Fact]
+    public async Task InspectAsync_HungProcess_IsBoundedByConfiguredTimeout()
+    {
+        // Arrange: point ffprobePath at a script that never produces output and never exits on
+        // its own -- this is what actually exercises "bounded subprocess timeout," as opposed to
+        // only ever running against the real, fast ffprobe binary. Found and fixed during
+        // independent review: the original implementation read stdout/stderr via the no-token
+        // ReadToEndAsync() overload and only checked the timeout with a separate WaitForExit(int)
+        // called AFTER those reads already returned -- so a process that hangs before writing
+        // anything was never actually bounded (confirmed via a live repro: 500ms configured
+        // timeout took 5+ seconds to react, and left the child process running afterward).
+        var scriptPath = Path.Combine(AppContext.BaseDirectory, "hanging-ffprobe.sh");
+        var inspector = new TransportStreamInspector(ffprobePath: scriptPath, timeout: TimeSpan.FromMilliseconds(300));
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => inspector.InspectAsync("irrelevant-path", CancellationToken.None));
+
+        sw.Stop();
+
+        // Generous upper bound (well above the 300ms configured timeout) to avoid flaking on a
+        // loaded CI box, while still failing decisively if the timeout isn't actually enforced
+        // (the pre-fix behavior took 5+ seconds against the same shape of hang).
+        Assert.True(sw.ElapsedMilliseconds < 3000,
+            $"Expected InspectAsync to honor its ~300ms timeout against a hung process, took {sw.ElapsedMilliseconds}ms");
+    }
+
+    [Fact]
+    public async Task InspectAsync_CallerCancellation_ThrowsOperationCanceledExceptionPromptly()
+    {
+        // Arrange: same hung-process double, but bound by a very generous inspector timeout so
+        // the CALLER's own token is what actually cuts it off, not the inspector's internal one.
+        var scriptPath = Path.Combine(AppContext.BaseDirectory, "hanging-ffprobe.sh");
+        var inspector = new TransportStreamInspector(ffprobePath: scriptPath, timeout: TimeSpan.FromSeconds(30));
+        using var cts = new CancellationTokenSource();
+        cts.CancelAfter(TimeSpan.FromMilliseconds(200));
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => inspector.InspectAsync("irrelevant-path", cts.Token));
+
+        sw.Stop();
+
+        Assert.True(sw.ElapsedMilliseconds < 3000,
+            $"Expected caller cancellation (~200ms) to cut off InspectAsync promptly, took {sw.ElapsedMilliseconds}ms");
+    }
+
+    [Fact]
     public async Task InspectAsync_MultipleAudioStreamsHaveDistinctLanguages()
     {
         // Arrange
