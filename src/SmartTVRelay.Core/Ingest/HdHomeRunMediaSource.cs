@@ -127,7 +127,11 @@ public sealed class HdHomeRunMediaSource : IBroadcastMediaSource
                     break;
                 }
 
-                var chunk = new MediaChunk(new ReadOnlyMemory<byte>(buffer, 0, bytesRead), stopwatch.Elapsed);
+                // Copy out of the shared read buffer -- buffer is reused on the next iteration,
+                // so a MediaChunk wrapping it directly (instead of copying) would silently alias
+                // whatever the next read overwrites it with, corrupting every previously-yielded
+                // chunk's Data as soon as the consumer stops holding the enumerator at that item.
+                var chunk = new MediaChunk(buffer[..bytesRead], stopwatch.Elapsed);
                 yield return chunk;
             }
         }

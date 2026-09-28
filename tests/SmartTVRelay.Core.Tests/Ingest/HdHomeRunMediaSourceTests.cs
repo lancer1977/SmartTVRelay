@@ -264,9 +264,18 @@ public class HdHomeRunMediaSourceTests
     {
         var lineupJson = @"[{""GuideNumber"":""2.1"",""URL"":""http://192.168.0.66:5004/auto/v2.1""}]";
 
-        // Create a fake stream that simulates multiple reads
+        // Create a fake stream that simulates multiple reads. Filled with a pattern whose period
+        // (251, prime) does not evenly divide the 65536-byte chunk size, so every chunk's content
+        // is genuinely distinguishable from every other chunk -- this is what actually catches a
+        // buffer-aliasing bug. A naive "i % 256" pattern will NOT catch it: 256 divides 65536
+        // exactly, so every full chunk has the identical repeating byte pattern regardless of
+        // which chunk it is, and aliasing the shared buffer would silently produce the same
+        // (wrong-but-matching) bytes.
         var streamData = new byte[200000]; // Larger than default 65536 chunk size
-        Array.Fill(streamData, (byte)0x47);
+        for (var i = 0; i < streamData.Length; i++)
+        {
+            streamData[i] = (byte)((i * 31 + 7) % 251);
+        }
 
         var handler = new FakeHttpMessageHandler(req =>
         {
@@ -290,6 +299,19 @@ public class HdHomeRunMediaSourceTests
         Assert.True(chunks.Count >= 3, $"Expected at least 3 chunks, got {chunks.Count}");
         var totalBytes = chunks.Sum(c => c.Data.Length);
         Assert.Equal(streamData.Length, totalBytes);
+
+        // Reconstruct and compare actual content -- not just lengths -- across all chunks,
+        // *after* the full read completes (so any chunk still aliasing an overwritten shared
+        // buffer would fail here even though it passed the length-only check above).
+        var reconstructed = new byte[streamData.Length];
+        var offset = 0;
+        foreach (var chunk in chunks)
+        {
+            chunk.Data.Span.CopyTo(reconstructed.AsSpan(offset));
+            offset += chunk.Data.Length;
+        }
+
+        Assert.Equal(streamData, reconstructed);
     }
 
     [Fact]
