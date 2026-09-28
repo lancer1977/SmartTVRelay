@@ -84,9 +84,19 @@ public sealed class FrameAudioSampler
             string? frameLine = null;
             while (true)
             {
+                // Read the next line from stdout. This is the call that actually blocks when
+                // ffmpeg is slow/hung, so the cancellation token must be passed here directly --
+                // a separate ThrowIfCancellationRequested() check before an untokened
+                // ReadLineAsync() (the original shape here) only fires BETWEEN lines and never
+                // interrupts a read that's already blocked waiting for the next one, so a
+                // genuinely hung ffmpeg process was never actually bounded by cancellation.
+                // Confirmed via a live repro before fixing: cancelling after 300ms against a
+                // process that produces no output hung for 6+ seconds with no reaction (only
+                // stopped by an external `timeout`, not by this method's own cancellation).
+                string? line;
                 try
                 {
-                    cancellationToken.ThrowIfCancellationRequested();
+                    line = await process.StandardOutput.ReadLineAsync(cancellationToken);
                 }
                 catch (OperationCanceledException)
                 {
@@ -102,9 +112,6 @@ public sealed class FrameAudioSampler
                     }
                     throw;
                 }
-
-                // Read the next line from stdout
-                var line = await process.StandardOutput.ReadLineAsync();
 
                 if (line == null)
                 {
@@ -215,9 +222,13 @@ public sealed class FrameAudioSampler
             string? frameLine = null;
             while (true)
             {
+                // See SampleVideoInternalAsync's identical comment: cancellation must be passed
+                // directly into ReadLineAsync (the call that actually blocks), not checked only
+                // between iterations, or a genuinely hung ffmpeg process is never bounded.
+                string? line;
                 try
                 {
-                    cancellationToken.ThrowIfCancellationRequested();
+                    line = await process.StandardOutput.ReadLineAsync(cancellationToken);
                 }
                 catch (OperationCanceledException)
                 {
@@ -233,9 +244,6 @@ public sealed class FrameAudioSampler
                     }
                     throw;
                 }
-
-                // Read the next line from stdout
-                var line = await process.StandardOutput.ReadLineAsync();
 
                 if (line == null)
                 {

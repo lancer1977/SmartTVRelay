@@ -164,7 +164,7 @@ public class FrameAudioSamplerTests
         using var cts = new CancellationTokenSource();
 
         // Act & Assert
-        var exception = await Assert.ThrowsAsync<OperationCanceledException>(async () =>
+        var exception = await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
         {
             int sampleCount = 0;
             await foreach (var _ in sampler.SampleVideoAsync(filePath, options, cts.Token))
@@ -178,6 +178,42 @@ public class FrameAudioSamplerTests
         });
 
         Assert.NotNull(exception);
+    }
+
+    [Fact]
+    public async Task SampleVideoAsync_HungProcess_CancellationBoundsItPromptly()
+    {
+        // The existing mid-stream cancellation test above cancels against a real, fast 2-second
+        // fixture that keeps producing lines regularly -- it can't distinguish "cancellation
+        // works" from "the fixture just finished fast enough that no one noticed." This test uses
+        // a process that never produces any output and never exits on its own, which is what
+        // actually exercises whether cancellation bounds a genuine hang.
+        //
+        // Found and fixed during independent review: the original implementation checked
+        // cancellationToken.ThrowIfCancellationRequested() BEFORE an untokened
+        // ReadLineAsync() call each loop iteration. That check only fires BETWEEN lines --
+        // once blocked inside a ReadLineAsync() that never returns (a hung process), it never
+        // got revisited. Confirmed via a live repro before fixing: cancelling after 300ms
+        // against a hanging process hung for 6+ seconds with no reaction at all (only stopped
+        // by an external `timeout` wrapper, not by this method's own cancellation).
+        var scriptPath = Path.Combine(AppContext.BaseDirectory, "hanging-ffmpeg.sh");
+        var sampler = new FrameAudioSampler(ffmpegPath: scriptPath);
+        using var cts = new CancellationTokenSource();
+        cts.CancelAfter(TimeSpan.FromMilliseconds(300));
+
+        var sw = Stopwatch.StartNew();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+        {
+            await foreach (var _ in sampler.SampleVideoAsync("irrelevant.ts", null, cts.Token))
+            {
+            }
+        });
+
+        sw.Stop();
+
+        Assert.True(sw.ElapsedMilliseconds < 3000,
+            $"Expected cancellation (~300ms) to bound a hung process promptly, took {sw.ElapsedMilliseconds}ms");
     }
 
     #endregion
@@ -317,7 +353,7 @@ public class FrameAudioSamplerTests
         using var cts = new CancellationTokenSource();
 
         // Act & Assert
-        var exception = await Assert.ThrowsAsync<OperationCanceledException>(async () =>
+        var exception = await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
         {
             int sampleCount = 0;
             await foreach (var _ in sampler.SampleAudioAsync(filePath, options, cts.Token))
