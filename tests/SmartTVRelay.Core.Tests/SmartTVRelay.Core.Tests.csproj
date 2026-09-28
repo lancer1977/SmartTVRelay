@@ -18,5 +18,7 @@
     <None Include="../../fixtures/samples/*.json" CopyToOutputDirectory="PreserveNewest" Link="samples/%(Filename)%(Extension)" />
     <None Include="../../fixtures/captures/*.ts" CopyToOutputDirectory="PreserveNewest" Link="captures/%(Filename)%(Extension)" />
     <None Include="Fixtures/scripts/hanging-ffprobe.sh" CopyToOutputDirectory="PreserveNewest" Link="hanging-ffprobe.sh" />
+    <None Include="../../fixtures/synthetic/*.ts" CopyToOutputDirectory="PreserveNewest" Link="synthetic/%(Filename)%(Extension)" />
+    <None Include="Fixtures/scripts/hanging-ffmpeg.sh" CopyToOutputDirectory="PreserveNewest" Link="hanging-ffmpeg.sh" />
   </ItemGroup>
 </Project>
