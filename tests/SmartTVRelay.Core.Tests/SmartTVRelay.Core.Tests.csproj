@@ -17,5 +17,6 @@
   <ItemGroup>
     <None Include="../../fixtures/samples/*.json" CopyToOutputDirectory="PreserveNewest" Link="samples/%(Filename)%(Extension)" />
     <None Include="../../fixtures/captures/*.ts" CopyToOutputDirectory="PreserveNewest" Link="captures/%(Filename)%(Extension)" />
+    <None Include="Fixtures/scripts/hanging-ffprobe.sh" CopyToOutputDirectory="PreserveNewest" Link="hanging-ffprobe.sh" />
   </ItemGroup>
 </Project>

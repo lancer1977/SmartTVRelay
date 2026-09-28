@@ -21,6 +21,12 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
+      - name: Install ffmpeg
+        # TransportStreamInspector (#31) and FrameAudioSampler (#34) shell out to
+        # real ffprobe/ffmpeg binaries; the hosted ubuntu-24.04 runner doesn't have
+        # them preinstalled, so tests exercising real fixtures fail with
+        # Win32Exception "No such file or directory" without this step.
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - name: Restore
         run: dotnet restore SmartTVRelay.slnx
       - name: Build
