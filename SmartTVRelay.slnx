@@ -1,6 +1,7 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/SmartTVRelay.Core/SmartTVRelay.Core.csproj" />
+    <Project Path="src/SmartTVRelay.Evaluation/SmartTVRelay.Evaluation.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/SmartTVRelay.Core.Tests/SmartTVRelay.Core.Tests.csproj" />

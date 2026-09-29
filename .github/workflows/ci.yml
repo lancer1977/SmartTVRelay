@@ -33,3 +33,16 @@ jobs:
         run: dotnet build SmartTVRelay.slnx -c Release
       - name: Test
         run: dotnet test SmartTVRelay.slnx -c Release
+      - name: Evaluate synthetic broadcast corpus
+        # Fixed synthetic fixtures only -- no live hardware/network dependency (#27). Exit code 1
+        # means a metric regression (ran fine, didn't meet the bar); exit code 2 means the
+        # evaluation itself couldn't run (a tooling bug) -- both fail the job, but the distinction
+        # is preserved in the step's own output rather than collapsed into one generic failure.
+        run: dotnet run --project src/SmartTVRelay.Evaluation -c Release -- --output artifacts/evaluation
+      - name: Publish evaluation report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evaluation-report
+          path: artifacts/evaluation
+          if-no-files-found: warn
