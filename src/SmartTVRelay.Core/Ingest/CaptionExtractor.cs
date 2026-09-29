@@ -57,12 +57,26 @@ public sealed class CaptionExtractor
         var processInfo = new ProcessStartInfo
         {
             FileName = _ffmpegPath,
-            Arguments = $"-v error -i \"{filePath}\" -map 0:s:0? -c:s webvtt -f webvtt -",
             UseShellExecute = false,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             CreateNoWindow = true,
         };
+
+        // Passed as separate arguments, not an interpolated Arguments string: filePath can
+        // legally contain a double quote on Unix, which would otherwise let it terminate the
+        // quoted segment early and inject additional ffmpeg options or a different path.
+        processInfo.ArgumentList.Add("-v");
+        processInfo.ArgumentList.Add("error");
+        processInfo.ArgumentList.Add("-i");
+        processInfo.ArgumentList.Add(filePath);
+        processInfo.ArgumentList.Add("-map");
+        processInfo.ArgumentList.Add("0:s:0?");
+        processInfo.ArgumentList.Add("-c:s");
+        processInfo.ArgumentList.Add("webvtt");
+        processInfo.ArgumentList.Add("-f");
+        processInfo.ArgumentList.Add("webvtt");
+        processInfo.ArgumentList.Add("-");
 
         using var process = new Process { StartInfo = processInfo };
 
@@ -99,10 +113,21 @@ public sealed class CaptionExtractor
         catch (OperationCanceledException)
         {
             // Ensure process is killed on cancellation OR timeout (both surface as
-            // OperationCanceledException via the linked token).
+            // OperationCanceledException via the linked token). Kill() only requests
+            // termination asynchronously, so wait for the exit to actually complete --
+            // otherwise a caller that cancels repeatedly can accumulate live ffmpeg processes
+            // (same pattern as FrameAudioSampler's cancellation paths).
             if (!process.HasExited)
             {
                 process.Kill(entireProcessTree: true);
+                try
+                {
+                    await process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Best-effort: the cancellation itself is what matters to the caller.
+                }
             }
 
             throw;
