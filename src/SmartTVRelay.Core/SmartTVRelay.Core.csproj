@@ -11,4 +11,15 @@
   <ItemGroup>
     <PackageReference Include="Observation.Core" Version="0.1.0-preview.1" />
   </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      Transitional: PolyhydraGames.CaptionExtractor (github.com/lancer1977/caption-extractor) is not
+      published yet. GitHub Packages and NuGet.org publishing is set up but not yet triggered by a
+      release. $(HOME) anchors this to that repo's canonical checkout regardless of whether THIS
+      repo is built from its own canonical checkout or a worktree, since a relative path would
+      resolve differently in each case. Switch to a PackageReference once a version is published.
+    -->
+    <ProjectReference Include="$(HOME)/code/caption-extractor/src/PolyhydraGames.CaptionExtractor/PolyhydraGames.CaptionExtractor.csproj" />
+  </ItemGroup>
 </Project>
