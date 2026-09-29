@@ -14,23 +14,9 @@ jobs:
     # variable. No self-hosted runner is registered for this repo yet, so
     # HOSTED_CI_ENABLED=true is set for now; flip it off once one exists.
     runs-on: ${{ fromJSON(vars.HOSTED_CI_ENABLED == 'true' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","pr-validation","smarttvrelay"]') }}
-    env:
-      # Transitional (see SmartTVRelay.Core.csproj): PolyhydraGames.CaptionExtractor isn't published
-      # yet, so it's built from a sibling checkout of the private repo rather than a package.
-      CAPTION_EXTRACTOR_ROOT: ${{ github.workspace }}/caption-extractor
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Checkout caption-extractor
-        # Private repo, not yet published as a package -- CAPTION_EXTRACTOR_PAT is a fine-grained
-        # PAT scoped to read-only "Contents" access on lancer1977/caption-extractor only. Remove
-        # this step once that repo ships a package and SmartTVRelay.Core.csproj switches to a
-        # PackageReference.
-        uses: actions/checkout@v4
-        with:
-          repository: lancer1977/caption-extractor
-          token: ${{ secrets.CAPTION_EXTRACTOR_PAT }}
-          path: caption-extractor
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
