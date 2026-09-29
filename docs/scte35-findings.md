@@ -130,6 +130,48 @@ same collapsed-single-byte bug the parser had, so neither would have caught it. 
 (`Extract_ImmediateSplice_EmitsNoSignal`, `Extract_UnspecifiedSpliceTime_EmitsNoSignal`,
 `Extract_WithPtsAdjustment_AppliesItToTheObservedTime`) pin fixes 6 and 7.
 
+## Bugs found and fixed on second re-review (PR #70, second automated review pass)
+
+A third review pass, after the fixes above were pushed, found three more real defects:
+
+10. **A canceled event stayed in the returned signals (P1).** When a scheduled CueOut/CueIn is
+    later canceled by a second `splice_insert` sharing the same `splice_event_id` and
+    `splice_event_cancel_indicator=1`, the original code's cancellation handling only affected
+    the cancel command's own section -- it did nothing to the earlier signal already appended to
+    the result list for that same event, so a genuinely canceled event still came back as
+    high-confidence commercial evidence. Fixed by tracking `splice_event_id` per pending signal
+    and per cancellation across the whole PID scan (not per-section, since the cancellation can
+    arrive in any later section), then filtering canceled IDs out at the very end -- correct
+    regardless of whether the cancellation happens to arrive before or after the event it
+    cancels.
+11. **Multiple sections packed into one TS packet were merged into a single blob (P2).** When two
+    or more complete PSI sections are packed into the same TS packet's payload -- realistic for
+    SCTE-35, since a CueOut and CueIn are each small -- the section accumulator invoked
+    `onSection` only once per `payload_unit_start` boundary, treating the whole span (both
+    sections concatenated) as if it were one section. Each specific parser only reads its own
+    section's declared length from the front of that blob, so every section after the first in
+    the same payload was silently dropped -- concretely, a packed CueIn immediately following a
+    CueOut would vanish, leaving only the CueOut in the result. Fixed by rewriting the
+    accumulator to determine each section's own length from its `table_id`/`section_length`
+    header and dispatch every complete section it finds, compacting only a genuinely incomplete
+    trailing section forward to the next packet. This required also fixing the fixture
+    generators (the checked-in synthetic fixture, its C# generator, and the test file's
+    hand-crafted helpers) to fill unused TS packet tail bytes with `0xFF` stuffing
+    (ISO/IEC 13818-1 2.4.4.7) instead of leaving them zero-initialized: a demuxer that correctly
+    stops at the section boundary once it sees non-section data cannot tell zero-initialized
+    padding apart from the start of a genuine PAT-table_id (`0x00`) section with a bogus
+    zero-length -- confirmed by reproducing exactly that corruption (the checked-in fixture's
+    second section vanished) before fixing the fixture generators.
+12. **Caller cancellation was silently swallowed into a "successful" result (P2).** `Extract`'s
+    outer `catch (Exception)` also caught `OperationCanceledException`, so cancelling the
+    supplied token mid-parse returned whatever had been extracted so far as if it were a normal,
+    complete result, rather than surfacing the cancellation to the caller. Fixed by catching and
+    rethrowing `OperationCanceledException` before the broader catch.
+
+New tests pin all three: `Extract_TwoSectionsPackedInOnePacket_ReturnsBothSignals`,
+`Extract_CanceledEvent_ExcludesItFromReturnedSignals`,
+`Extract_AlreadyCanceledToken_ThrowsOperationCanceledExceptionRatherThanReturningPartialResults`.
+
 ## Known Limitations (intentional, not bugs)
 
 1. **No CRC validation** -- sections are parsed but `CRC_32` is not verified.

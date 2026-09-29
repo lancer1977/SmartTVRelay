@@ -197,8 +197,13 @@ public class Scte35FixtureGenerator
         int payloadStart = 4;
         int payloadSize = Math.Min(payload.Length, TS_PACKET_SIZE - payloadStart);
         Array.Copy(payload, 0, packet, payloadStart, payloadSize);
-        // Remaining bytes default to 0x00 stuffing, which is fine: the parser only reads
-        // exactly payloadSize bytes worth of real content per accumulation call.
+        // Fill the unused tail with 0xFF stuffing, per ISO/IEC 13818-1 2.4.4.7 -- not left as
+        // zero-initialized padding, which the parser cannot distinguish from the start of a
+        // genuine PAT-table_id (0x00) section with a bogus zero length.
+        for (int i = payloadStart + payloadSize; i < TS_PACKET_SIZE; i++)
+        {
+            packet[i] = 0xFF;
+        }
 
         writer.Write(packet);
     }

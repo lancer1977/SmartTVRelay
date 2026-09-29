@@ -73,6 +73,12 @@ public sealed class Scte35MarkerExtractor
 
             return signals;
         }
+        catch (OperationCanceledException)
+        {
+            // Caller cancellation must be observable, not silently turned into a "successful"
+            // (partial) result -- the broad catch below is for genuine parsing errors only.
+            throw;
+        }
         catch (Exception)
         {
             // Any parsing error (malformed file, truncated packet, out-of-range index, etc.):
@@ -84,8 +90,12 @@ public sealed class Scte35MarkerExtractor
     /// <summary>
     /// Scans TS packets for a given PID, accumulating each PSI-style section's payload while
     /// correctly skipping the pointer_field byte at the start of every payload_unit_start_indicator
-    /// packet, and invokes <paramref name="onSection"/> once a full section has been accumulated
-    /// (either because a new section starts, or because the stream ends).
+    /// packet, and invokes <paramref name="onSection"/> once for every complete section found --
+    /// including when two or more small sections (e.g. a CueOut immediately followed by a CueIn)
+    /// are packed into the same TS packet's payload, which an earlier version of this method
+    /// missed entirely: it accumulated everything up to the next payload_unit_start as a single
+    /// blob and invoked onSection only once, silently dropping every section after the first in
+    /// that payload.
     /// </summary>
     private static void ScanSectionsForPid(
         BinaryReader reader,
@@ -165,11 +175,10 @@ public sealed class Scte35MarkerExtractor
                     }
                 }
 
-                if (sectionDataLength > 0)
-                {
-                    onSection(sectionData, sectionDataLength);
-                    sectionDataLength = 0;
-                }
+                // Whatever is now in sectionData is exactly one complete, finished section (or
+                // nothing, for the very first section ever seen on this PID): the byte right
+                // after the pointer_field's continuation bytes always starts a brand-new section.
+                sectionDataLength = DrainCompleteSections(sectionData, sectionDataLength, onSection);
 
                 copyFrom = afterPointer + pointerField;
             }
@@ -186,12 +195,83 @@ public sealed class Scte35MarkerExtractor
                 Array.Copy(packet, copyFrom, sectionData, sectionDataLength, copySize);
                 sectionDataLength += copySize;
             }
+
+            // The payload just appended may complete the section in progress AND contain one or
+            // more further complete sections packed right after it in the same payload.
+            sectionDataLength = DrainCompleteSections(sectionData, sectionDataLength, onSection);
         }
 
-        if (sectionDataLength > 0)
+        // EOF: dispatch whatever complete section(s) remain. A genuinely truncated trailing
+        // section is simply dropped, matching this class's overall "never throw, return what was
+        // successfully parsed" contract.
+        DrainCompleteSections(sectionData, sectionDataLength, onSection);
+    }
+
+    /// <summary>
+    /// Extracts and dispatches every complete PSI-style section currently at the front of
+    /// <paramref name="sectionData"/> -- each section's own table_id + section_length determines
+    /// its exact length, so two or more small sections packed into the same accumulated bytes
+    /// (e.g. a CueOut immediately followed by a CueIn) are each dispatched separately, not
+    /// merged into one call. Compacts any leftover, not-yet-complete section to the front of the
+    /// buffer and returns its length.
+    /// </summary>
+    /// <remarks>
+    /// Stuffing bytes (table_id=0xFF, ISO/IEC 13818-1 2.4.4.7) fill the rest of a TS packet's
+    /// payload after the last real section and are discarded here rather than treated as the
+    /// start of a section awaiting more data -- otherwise every later section on this PID would
+    /// be swallowed waiting for bytes that never satisfy a bogus declared length.
+    /// </remarks>
+    private static int DrainCompleteSections(byte[] sectionData, int sectionDataLength, Action<byte[], int> onSection)
+    {
+        int offset = 0;
+
+        while (true)
         {
-            onSection(sectionData, sectionDataLength);
+            int remaining = sectionDataLength - offset;
+            if (remaining < 3)
+            {
+                break; // Not enough bytes to even read table_id + section_length yet.
+            }
+
+            if (sectionData[offset] == 0xFF)
+            {
+                // Stuffing: nothing here, or after it, is a section in progress.
+                offset = sectionDataLength;
+                break;
+            }
+
+            int declaredSectionLength = ((sectionData[offset + 1] & 0x0F) << 8) | sectionData[offset + 2];
+            int totalSectionLength = 3 + declaredSectionLength;
+
+            if (totalSectionLength > sectionData.Length - offset)
+            {
+                // Malformed: claims to be larger than the scratch buffer could ever hold from
+                // here. Drop it rather than wait forever for bytes that would overflow.
+                offset = sectionDataLength;
+                break;
+            }
+
+            if (remaining < totalSectionLength)
+            {
+                break; // A real section, but not fully accumulated yet -- wait for more bytes.
+            }
+
+            // Dispatch a private, exactly-sized copy so a caller reading data[0..length) can
+            // never observe bytes belonging to a different section in the shared scratch buffer.
+            var section = new byte[totalSectionLength];
+            Array.Copy(sectionData, offset, section, 0, totalSectionLength);
+            onSection(section, totalSectionLength);
+
+            offset += totalSectionLength;
         }
+
+        int leftover = sectionDataLength - offset;
+        if (leftover > 0 && offset > 0)
+        {
+            Array.Copy(sectionData, offset, sectionData, 0, leftover);
+        }
+
+        return leftover;
     }
 
     private int? FindPmtPidFromPat(BinaryReader reader, CancellationToken cancellationToken)
@@ -316,13 +396,29 @@ public sealed class Scte35MarkerExtractor
 
     private void ExtractSpliceInserts(BinaryReader reader, int scte35Pid, List<ExplicitMarkerSignal> signals, CancellationToken cancellationToken)
     {
+        // splice_event_id is scoped per-PID for the lifetime of this extraction, not per section:
+        // a later splice_insert cancelling an earlier one by event_id can arrive in any later
+        // section, so a signal can only be finalized once the whole PID has been scanned. Kept
+        // separate from `signals` (which the caller already owns) rather than mutating it
+        // in-place, so a cancellation can remove an earlier entry regardless of arrival order.
+        var pendingSignals = new List<(uint EventId, ExplicitMarkerSignal Signal)>();
+        var canceledEventIds = new HashSet<uint>();
+
         ScanSectionsForPid(reader, scte35Pid, bufferSize: 4096, (data, length) =>
         {
-            TryParseScte35Section(data, length, signals);
+            TryParseScte35Section(data, length, pendingSignals, canceledEventIds);
         }, cancellationToken);
+
+        foreach (var (eventId, signal) in pendingSignals)
+        {
+            if (!canceledEventIds.Contains(eventId))
+            {
+                signals.Add(signal);
+            }
+        }
     }
 
-    private static void TryParseScte35Section(byte[] data, int length, List<ExplicitMarkerSignal> signals)
+    private static void TryParseScte35Section(byte[] data, int length, List<(uint EventId, ExplicitMarkerSignal Signal)> pendingSignals, HashSet<uint> canceledEventIds)
     {
         // splice_info_section() fixed header, byte-exact (ANSI/SCTE 35):
         //   table_id                                          8 bits  -> data[0]
@@ -387,10 +483,10 @@ public sealed class Scte35MarkerExtractor
             commandEnd = Math.Min(commandEnd, commandStart + spliceCommandLength);
         }
 
-        TryParseSpliceInsert(data, commandStart, commandEnd, ptsAdjustment, signals);
+        TryParseSpliceInsert(data, commandStart, commandEnd, ptsAdjustment, pendingSignals, canceledEventIds);
     }
 
-    private static void TryParseSpliceInsert(byte[] data, int startIndex, int commandEnd, ulong ptsAdjustment, List<ExplicitMarkerSignal> signals)
+    private static void TryParseSpliceInsert(byte[] data, int startIndex, int commandEnd, ulong ptsAdjustment, List<(uint EventId, ExplicitMarkerSignal Signal)> pendingSignals, HashSet<uint> canceledEventIds)
     {
         // splice_insert() (fields actually needed for CueOut/CueIn detection; duration,
         // component-splice-per-PID, and avail fields are intentionally not parsed):
@@ -410,7 +506,8 @@ public sealed class Scte35MarkerExtractor
             return; // Too short for splice_event_id.
         }
 
-        i += 4; // Skip splice_event_id.
+        uint spliceEventId = (uint)((data[i] << 24) | (data[i + 1] << 16) | (data[i + 2] << 8) | data[i + 3]);
+        i += 4;
 
         if (i >= commandEnd)
         {
@@ -423,7 +520,12 @@ public sealed class Scte35MarkerExtractor
         bool spliceEventCancelIndicator = (cancelByte & 0x80) != 0;
         if (spliceEventCancelIndicator)
         {
-            return; // Event cancelled: nothing to signal.
+            // A cancellation can arrive after its target event's own splice_insert has already
+            // been parsed and queued (the normal case: announce, later cancel). Recording the ID
+            // here, rather than trying to find and remove an already-added signal immediately,
+            // means the removal is correct regardless of arrival order or which section it's in.
+            canceledEventIds.Add(spliceEventId);
+            return;
         }
 
         if (i >= commandEnd)
@@ -475,7 +577,7 @@ public sealed class Scte35MarkerExtractor
         ulong adjustedPtsTime = (ptsTime + ptsAdjustment) & 0x1FFFFFFFFUL; // mod 2^33, per spec.
         var observedAt = DateTimeOffset.UnixEpoch + TimeSpan.FromSeconds(adjustedPtsTime / 90000.0);
 
-        signals.Add(new ExplicitMarkerSignal(kind, observedAt));
+        pendingSignals.Add((spliceEventId, new ExplicitMarkerSignal(kind, observedAt)));
     }
 
     /// <summary>

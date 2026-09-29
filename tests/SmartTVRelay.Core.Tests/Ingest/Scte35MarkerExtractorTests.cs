@@ -202,6 +202,139 @@ public class Scte35MarkerExtractorTests
         }
     }
 
+    [Fact]
+    public void Extract_TwoSectionsPackedInOnePacket_ReturnsBothSignals()
+    {
+        // Arrange: a CueOut and a CueIn splice_insert, small enough to both fit in one TS
+        // packet's 184-byte payload, packed together (real broadcast encoders can and do pack
+        // multiple small PSI sections into a single packet). An earlier version of
+        // ScanSectionsForPid accumulated the whole payload as a single blob and invoked
+        // onSection only once per payload_unit_start boundary, so the second section here would
+        // have been silently dropped.
+        const int patPid = 0x0000;
+        const int pmtPid = 0x0200;
+        const int scte35Pid = 0x0201;
+        var filePath = Path.Combine(Path.GetTempPath(), $"scte35-packed-{Guid.NewGuid()}.ts");
+
+        try
+        {
+            using (var fs = new FileStream(filePath, FileMode.Create, FileAccess.Write))
+            {
+                var writer = new BinaryWriter(fs);
+                WriteSection(writer, patPid, BuildPatSection(pmtPid));
+                WriteSection(writer, pmtPid, BuildPmtSection(scte35Pid));
+
+                var cueOut = BuildSpliceInsertSection(eventId: 1, cueOut: true, ptsTime: 90_000);
+                var cueIn = BuildSpliceInsertSection(eventId: 2, cueOut: false, ptsTime: 180_000);
+                WriteSections(writer, scte35Pid, cueOut, cueIn);
+
+                writer.Flush();
+            }
+
+            // Act
+            var signals = _extractor.Extract(filePath, CancellationToken.None);
+
+            // Assert
+            Assert.Equal(2, signals.Count);
+            var actualCueOut = Assert.Single(signals, s => s.Kind == ExplicitMarkerKind.CueOut);
+            Assert.Equal(DateTimeOffset.UnixEpoch + TimeSpan.FromSeconds(1.0), actualCueOut.ObservedAt);
+            var actualCueIn = Assert.Single(signals, s => s.Kind == ExplicitMarkerKind.CueIn);
+            Assert.Equal(DateTimeOffset.UnixEpoch + TimeSpan.FromSeconds(2.0), actualCueIn.ObservedAt);
+        }
+        finally
+        {
+            File.Delete(filePath);
+        }
+    }
+
+    [Fact]
+    public void Extract_CanceledEvent_ExcludesItFromReturnedSignals()
+    {
+        // Arrange: a CueOut is announced for event_id=1, then later canceled by a second
+        // splice_insert with the same event_id and splice_event_cancel_indicator=1. The
+        // canceled CueOut must not appear in the returned signals -- an earlier version ignored
+        // the cancellation entirely and left the already-parsed CueOut in the list, which would
+        // expose a real cancellation as high-confidence commercial evidence.
+        const int patPid = 0x0000;
+        const int pmtPid = 0x0200;
+        const int scte35Pid = 0x0201;
+        var filePath = Path.Combine(Path.GetTempPath(), $"scte35-canceled-{Guid.NewGuid()}.ts");
+
+        try
+        {
+            using (var fs = new FileStream(filePath, FileMode.Create, FileAccess.Write))
+            {
+                var writer = new BinaryWriter(fs);
+                WriteSection(writer, patPid, BuildPatSection(pmtPid));
+                WriteSection(writer, pmtPid, BuildPmtSection(scte35Pid));
+                WriteSection(writer, scte35Pid, BuildSpliceInsertSection(eventId: 1, cueOut: true, ptsTime: 90_000));
+                WriteSection(writer, scte35Pid, BuildSpliceInsertSection(eventId: 1, cueOut: true, ptsTime: 0, cancel: true));
+
+                writer.Flush();
+            }
+
+            // Act
+            var signals = _extractor.Extract(filePath, CancellationToken.None);
+
+            // Assert
+            Assert.Empty(signals);
+        }
+        finally
+        {
+            File.Delete(filePath);
+        }
+    }
+
+    [Fact]
+    public void Extract_AlreadyCanceledToken_ThrowsOperationCanceledExceptionRatherThanReturningPartialResults()
+    {
+        // Arrange: caller cancellation must be observable, not silently turned into a
+        // "successful" (partial or empty) result by the broad catch that handles genuine parsing
+        // errors -- an earlier version caught OperationCanceledException too, along with every
+        // other exception type, and returned whatever had been parsed so far as if it were a
+        // normal, complete result.
+        var filePath = Path.Combine(Path.GetTempPath(), $"scte35-canceled-token-{Guid.NewGuid()}.ts");
+
+        try
+        {
+            WriteHandCraftedFixture(filePath, ptsTime: 90_000);
+            using var cts = new CancellationTokenSource();
+            cts.Cancel();
+
+            // Act & Assert
+            Assert.ThrowsAny<OperationCanceledException>(() => _extractor.Extract(filePath, cts.Token));
+        }
+        finally
+        {
+            File.Delete(filePath);
+        }
+    }
+
+    private static byte[] BuildPatSection(int pmtPid) => new byte[]
+    {
+        0x00,                                                       // table_id
+        0xB0, 0x0D,                                                  // section_length=13
+        0x00, 0x01,                                                  // transport_stream_id
+        0xC1, 0x00, 0x00,                                            // version/current_next, section_number, last_section_number
+        0x00, 0x01,                                                  // program_number = 1
+        (byte)(0xE0 | ((pmtPid >> 8) & 0x1F)), (byte)(pmtPid & 0xFF), // reserved + PMT PID
+        0x00, 0x00, 0x00, 0x00,                                      // CRC_32 (unvalidated)
+    };
+
+    private static byte[] BuildPmtSection(int scte35Pid) => new byte[]
+    {
+        0x02,                                                              // table_id
+        0xB0, 0x12,                                                         // section_length=18
+        0x00, 0x01,                                                         // program_number = 1
+        0xC1, 0x00, 0x00,                                                   // version/current_next, section_number, last_section_number
+        0xE0, 0x00,                                                         // reserved + PCR_PID (unused)
+        0xF0, 0x00,                                                         // reserved + program_info_length = 0
+        0x86,                                                               // stream_type: SCTE-35
+        (byte)(0xE0 | ((scte35Pid >> 8) & 0x1F)), (byte)(scte35Pid & 0xFF), // reserved + elementary_PID
+        0xF0, 0x00,                                                         // reserved + ES_info_length = 0
+        0x00, 0x00, 0x00, 0x00,                                             // CRC_32 (unvalidated)
+    };
+
     /// <summary>
     /// Hand-builds a single-program MPEG-TS file (PAT -> PMT -> one SCTE-35 splice_insert
     /// CueOut section) independently of fixtures/synthetic/generate-scte35-fixture.cs, encoding
@@ -218,65 +351,65 @@ public class Scte35MarkerExtractorTests
         using var fs = new FileStream(filePath, FileMode.Create, FileAccess.Write);
         var writer = new BinaryWriter(fs);
 
-        // PAT: table_id(0x00), section_length=13, program 1 -> pmtPid.
-        var pat = new byte[]
-        {
-            0x00,                                                    // table_id
-            0xB0, 0x0D,                                               // section_syntax_indicator=1, section_length=13
-            0x00, 0x01,                                               // transport_stream_id
-            0xC1, 0x00, 0x00,                                         // version/current_next, section_number, last_section_number
-            0x00, 0x01,                                               // program_number = 1
-            (byte)(0xE0 | ((pmtPid >> 8) & 0x1F)), (byte)(pmtPid & 0xFF), // reserved + PMT PID
-            0x00, 0x00, 0x00, 0x00,                                   // CRC_32 (unvalidated)
-        };
-        WriteSection(writer, patPid, pat);
+        WriteSection(writer, patPid, BuildPatSection(pmtPid));
+        WriteSection(writer, pmtPid, BuildPmtSection(scte35Pid));
 
-        // PMT: table_id(0x02), one elementary stream, stream_type=0x86 (SCTE-35) at scte35Pid.
-        var pmt = new byte[]
-        {
-            0x02,                                                     // table_id
-            0xB0, 0x12,                                                // section_length=18
-            0x00, 0x01,                                                // program_number = 1
-            0xC1, 0x00, 0x00,                                          // version/current_next, section_number, last_section_number
-            0xE0, 0x00,                                                // reserved + PCR_PID (unused)
-            0xF0, 0x00,                                                // reserved + program_info_length = 0
-            0x86,                                                      // stream_type: SCTE-35
-            (byte)(0xE0 | ((scte35Pid >> 8) & 0x1F)), (byte)(scte35Pid & 0xFF), // reserved + elementary_PID
-            0xF0, 0x00,                                                // reserved + ES_info_length = 0
-            0x00, 0x00, 0x00, 0x00,                                    // CRC_32 (unvalidated)
-        };
-        WriteSection(writer, pmtPid, pmt);
+        var scte35Section = BuildSpliceInsertSection(eventId: 1, cueOut: true, ptsTime: ptsTime, ptsAdjustment: ptsAdjustment, immediate: immediate, timeSpecified: timeSpecified);
+        WriteSection(writer, scte35Pid, scte35Section);
 
-        // splice_insert(): splice_event_id=1, out_of_network_indicator=1 (CueOut),
+        writer.Flush();
+    }
+
+    /// <summary>
+    /// Builds one complete splice_info_section() containing one splice_insert() command, byte-exact
+    /// per ANSI/SCTE 35. When <paramref name="cancel"/> is true, builds a cancellation for
+    /// <paramref name="eventId"/> instead (splice_event_cancel_indicator=1; no flags/splice_time
+    /// bytes follow, since none exist in that case).
+    /// </summary>
+    private static byte[] BuildSpliceInsertSection(uint eventId, bool cueOut, uint ptsTime, uint ptsAdjustment = 0, bool immediate = false, bool timeSpecified = true, bool cancel = false)
+    {
+        // splice_insert(): splice_event_id, out_of_network_indicator=<cueOut>,
         // program_splice_flag=1, splice_immediate_flag=<immediate>.
         // Per ANSI/SCTE 35, splice_event_cancel_indicator is its own byte (bit7 + 7 reserved
-        // bits); out_of_network/program_splice/duration/immediate flags are the NEXT byte.
-        // splice_time() is present only when program_splice_flag=1 AND splice_immediate_flag=0;
-        // it is 1 byte when time_specified_flag=0 (flag + 7 reserved bits, no pts_time), or 5
-        // bytes when time_specified_flag=1 (flag + 6 reserved bits + 33-bit pts_time, no
-        // marker bits).
-        byte flagsByte = (byte)(0xC0 | (immediate ? 0x10 : 0x00)); // out_of_network=1, program_splice=1
+        // bits); out_of_network/program_splice/duration/immediate flags are the NEXT byte, present
+        // only when splice_event_cancel_indicator=0. splice_time() is present only when
+        // program_splice_flag=1 AND splice_immediate_flag=0; it is 1 byte when
+        // time_specified_flag=0 (flag + 7 reserved bits, no pts_time), or 5 bytes when
+        // time_specified_flag=1 (flag + 6 reserved bits + 33-bit pts_time, no marker bits).
         var spliceInsert = new List<byte>
         {
-            0x00, 0x00, 0x00, 0x01, // splice_event_id
-            0x00,                   // splice_event_cancel_indicator=0, reserved(7)
-            flagsByte,
+            (byte)((eventId >> 24) & 0xFF),
+            (byte)((eventId >> 16) & 0xFF),
+            (byte)((eventId >> 8) & 0xFF),
+            (byte)(eventId & 0xFF),
         };
 
-        if (!immediate)
+        if (cancel)
         {
-            if (!timeSpecified)
+            spliceInsert.Add(0x80); // splice_event_cancel_indicator=1, reserved(7)
+        }
+        else
+        {
+            spliceInsert.Add(0x00); // splice_event_cancel_indicator=0, reserved(7)
+
+            byte flagsByte = (byte)((cueOut ? 0x80 : 0x00) | 0x40 | (immediate ? 0x10 : 0x00)); // out_of_network + program_splice=1 + immediate
+            spliceInsert.Add(flagsByte);
+
+            if (!immediate)
             {
-                spliceInsert.Add(0x00); // time_specified_flag=0, reserved(7)
-            }
-            else
-            {
-                byte ptsByte0 = (byte)(0x80 | 0x7E | ((ptsTime >> 32) & 0x01));
-                spliceInsert.Add(ptsByte0);
-                spliceInsert.Add((byte)((ptsTime >> 24) & 0xFF));
-                spliceInsert.Add((byte)((ptsTime >> 16) & 0xFF));
-                spliceInsert.Add((byte)((ptsTime >> 8) & 0xFF));
-                spliceInsert.Add((byte)(ptsTime & 0xFF));
+                if (!timeSpecified)
+                {
+                    spliceInsert.Add(0x00); // time_specified_flag=0, reserved(7)
+                }
+                else
+                {
+                    byte ptsByte0 = (byte)(0x80 | 0x7E | ((ptsTime >> 32) & 0x01));
+                    spliceInsert.Add(ptsByte0);
+                    spliceInsert.Add((byte)((ptsTime >> 24) & 0xFF));
+                    spliceInsert.Add((byte)((ptsTime >> 16) & 0xFF));
+                    spliceInsert.Add((byte)((ptsTime >> 8) & 0xFF));
+                    spliceInsert.Add((byte)(ptsTime & 0xFF));
+                }
             }
         }
 
@@ -321,18 +454,31 @@ public class Scte35MarkerExtractorTests
         };
         scte35Section.AddRange(scte35Body);
 
-        WriteSection(writer, scte35Pid, scte35Section.ToArray());
-
-        writer.Flush();
+        return scte35Section.ToArray();
     }
 
     private static void WriteSection(BinaryWriter writer, int pid, byte[] section)
     {
+        WriteSections(writer, pid, section);
+    }
+
+    /// <summary>
+    /// Writes one or more complete sections packed into a single TS packet's payload (used to
+    /// exercise the "two sections in one packet" path -- see
+    /// Extract_TwoSectionsPackedInOnePacket_ReturnsBothSignals). The unused tail of the packet is
+    /// filled with 0xFF stuffing bytes, per ISO/IEC 13818-1 2.4.4.7 -- not left as zero-initialized
+    /// padding, which a spec-compliant demuxer cannot distinguish from the start of a genuine
+    /// PAT-table_id (0x00) section with a bogus zero length, and would misinterpret as such.
+    /// </summary>
+    private static void WriteSections(BinaryWriter writer, int pid, params byte[][] sections)
+    {
         const int tsPacketSize = 188;
 
-        var payload = new byte[section.Length + 1];
-        payload[0] = 0x00; // pointer_field: section begins immediately after this byte.
-        Array.Copy(section, 0, payload, 1, section.Length);
+        var payload = new List<byte> { 0x00 }; // pointer_field: first section begins right after this.
+        foreach (var section in sections)
+        {
+            payload.AddRange(section);
+        }
 
         var packet = new byte[tsPacketSize];
         packet[0] = 0x47; // sync byte
@@ -342,8 +488,11 @@ public class Scte35MarkerExtractorTests
         packet[2] = (byte)(pidField & 0xFF);
         packet[3] = 0x10; // adaptation_field_control=01 (payload only), continuity_counter=0
 
-        int payloadSize = Math.Min(payload.Length, tsPacketSize - 4);
-        Array.Copy(payload, 0, packet, 4, payloadSize);
+        int payloadSize = Math.Min(payload.Count, tsPacketSize - 4);
+        for (int i = 0; i < tsPacketSize - 4; i++)
+        {
+            packet[4 + i] = i < payloadSize ? payload[i] : (byte)0xFF; // 0xFF stuffing past the real payload.
+        }
 
         writer.Write(packet);
     }
