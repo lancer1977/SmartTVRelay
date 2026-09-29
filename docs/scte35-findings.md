@@ -172,6 +172,58 @@ New tests pin all three: `Extract_TwoSectionsPackedInOnePacket_ReturnsBothSignal
 `Extract_CanceledEvent_ExcludesItFromReturnedSignals`,
 `Extract_AlreadyCanceledToken_ThrowsOperationCanceledExceptionRatherThanReturningPartialResults`.
 
+## Bugs found and fixed on third re-review (PR #70, third automated review pass)
+
+A fourth review pass, after the fixes above were pushed, found three more real defects, all in
+the packet/section framing layer:
+
+13. **`transport_error_indicator` was never checked (P1).** Per ISO/IEC 13818-1, this bit means
+    the demuxer's upstream FEC/error-correction gave up and at least one uncorrectable bit error
+    is present somewhere in the packet's payload. Since this class never validates section CRCs
+    (see "Known Limitations" #1), a corrupted payload had no other integrity check backing it up
+    at all -- a bit-flipped byte could silently become a confident, wrongly-timed CueOut/CueIn, or
+    corrupt whatever section was in progress for that PID. Fixed by checking the bit
+    (`packet[1] & 0x80`) in `ScanSectionsForPid` and, when set, discarding that packet's
+    contribution entirely and invalidating any section already in progress for that PID (the
+    packet may have been meant to start, continue, or complete it -- all three are equally
+    untrustworthy once corrupted). Verified by temporarily disabling the check and confirming the
+    new regression test fails exactly as predicted (a corrupted continuation-shaped packet, if
+    honored, produces a spurious third signal).
+14. **A stale, never-completed section survived past its declared boundary (P2).** When a new
+    `payload_unit_start` packet's `pointer_field` continuation bytes are drained, any leftover
+    bytes are supposed to mean the *new* section is starting -- but the code only reset the
+    section accumulator for bytes that `DrainCompleteSections` chose not to consume, not for a
+    genuinely incomplete fragment sitting in the buffer from data loss (a section that declared
+    more bytes than a single packet could carry, with no continuation packets ever following, e.g.
+    dropped packets in a real capture). That stale fragment stayed in the buffer indefinitely,
+    silently absorbing every subsequent section's real bytes as if they were its own missing
+    continuation -- which, since its declared length could never actually be satisfied, meant the
+    genuine section was never dispatched at all. Fixed by unconditionally resetting the
+    accumulator to empty immediately after draining pointer_field continuation bytes, before the
+    new section's own bytes are appended, per the class's own documented reasoning that only
+    `payload_unit_start=0` packets are a legitimate multi-packet continuation, never a
+    `pointer_field`. Verified the same way as #13: disabling the reset reproduces exactly the
+    predicted failure (the genuine signal silently disappears rather than being corrupted or
+    duplicated).
+15. **`current_next_indicator` was never checked on PAT or PMT (P2).** Per ISO/IEC 13818-1, a
+    table with `current_next_indicator=0` (bit 0 of the version byte, `data[5]` in both PAT and
+    PMT) describes a not-yet-active table version -- typically seen mid version-transition -- and
+    must not be acted on until the currently-applicable version arrives. The original code
+    followed whichever PAT/PMT it saw first regardless of this bit, risking following a stale or
+    not-yet-active PMT PID (from the PAT) or SCTE-35 elementary PID (from the PMT). Fixed by
+    checking the bit in both `ParsePatSection` and `ParsePmtSection` and returning `null` (ignore,
+    wait for the next table) when it is clear. Verified by disabling each check independently and
+    confirming its matching regression test fails as predicted.
+
+All three fixes are in `ScanSectionsForPid` (13, 14) and `ParsePatSection`/`ParsePmtSection` (15).
+Each new regression test was verified to actually exercise its fix by temporarily reverting just
+that fix and confirming the test fails in the predicted way, then restoring it and confirming the
+full suite passes again -- consistent with how every prior round's fixes were validated. New
+tests: `Extract_TransportErrorIndicatorSet_DiscardsCorruptedPacketWithoutEmittingSignal`,
+`Extract_IncompleteSectionAtBoundary_StillParsesFollowingSectionCorrectly`,
+`Extract_PatCurrentNextIndicatorZero_ReturnsEmptyList`,
+`Extract_PmtCurrentNextIndicatorZero_ReturnsEmptyList`.
+
 ## Known Limitations (intentional, not bugs)
 
 1. **No CRC validation** -- sections are parsed but `CRC_32` is not verified.
@@ -228,4 +280,5 @@ above, that path is now confirmed to walk the real PMT correctly rather than fai
 
 ## Build & Test Results
 `dotnet build SmartTVRelay.slnx -c Release` -- 0 warnings, 0 errors.
-`dotnet test SmartTVRelay.slnx -c Release` -- 176/176 passing (171 prior + 5 new for this issue).
+`dotnet test SmartTVRelay.slnx -c Release` -- 186/186 passing (182 prior + 4 new for the third
+re-review round), stable across 4 repeated runs.

@@ -310,23 +310,207 @@ public class Scte35MarkerExtractorTests
         }
     }
 
-    private static byte[] BuildPatSection(int pmtPid) => new byte[]
+    [Fact]
+    public void Extract_TransportErrorIndicatorSet_DiscardsCorruptedPacketWithoutEmittingSignal()
+    {
+        // Arrange: a corrupted, non-payload-unit-start packet on the SCTE-35 PID with
+        // transport_error_indicator set, carrying what looks like a complete, self-contained
+        // splice_insert section (event_id=99, a deliberately distinctive bogus pts_time) right
+        // at its payload start -- the same shape as a genuine continuation packet. Per
+        // ISO/IEC 13818-1, transport_error_indicator means at least one uncorrectable bit error
+        // is present in this packet, so nothing in its payload can be trusted; an earlier
+        // version of ScanSectionsForPid did not check this bit at all and would have appended
+        // and parsed this bogus section as a spurious extra signal.
+        const int patPid = 0x0000;
+        const int pmtPid = 0x0200;
+        const int scte35Pid = 0x0201;
+        var filePath = Path.Combine(Path.GetTempPath(), $"scte35-tei-{Guid.NewGuid()}.ts");
+
+        try
+        {
+            using (var fs = new FileStream(filePath, FileMode.Create, FileAccess.Write))
+            {
+                var writer = new BinaryWriter(fs);
+                WriteSection(writer, patPid, BuildPatSection(pmtPid));
+                WriteSection(writer, pmtPid, BuildPmtSection(scte35Pid));
+                WriteSection(writer, scte35Pid, BuildSpliceInsertSection(eventId: 1, cueOut: true, ptsTime: 90_000));
+
+                var bogusSection = BuildSpliceInsertSection(eventId: 99, cueOut: false, ptsTime: 999_000);
+                WriteRawPacket(writer, scte35Pid, payloadUnitStart: false, transportErrorIndicator: true, bogusSection);
+
+                WriteSection(writer, scte35Pid, BuildSpliceInsertSection(eventId: 2, cueOut: false, ptsTime: 180_000));
+
+                writer.Flush();
+            }
+
+            // Act
+            var signals = _extractor.Extract(filePath, CancellationToken.None);
+
+            // Assert: exactly the two genuine events -- the corrupted packet's bogus event_id=99
+            // at ~11.1s must not appear at all, whether as a spurious third signal or in place of
+            // the genuine CueIn.
+            Assert.Equal(2, signals.Count);
+            var cueOut = Assert.Single(signals, s => s.Kind == ExplicitMarkerKind.CueOut);
+            Assert.Equal(DateTimeOffset.UnixEpoch + TimeSpan.FromSeconds(1.0), cueOut.ObservedAt);
+            var cueIn = Assert.Single(signals, s => s.Kind == ExplicitMarkerKind.CueIn);
+            Assert.Equal(DateTimeOffset.UnixEpoch + TimeSpan.FromSeconds(2.0), cueIn.ObservedAt);
+        }
+        finally
+        {
+            File.Delete(filePath);
+        }
+    }
+
+    [Fact]
+    public void Extract_IncompleteSectionAtBoundary_StillParsesFollowingSectionCorrectly()
+    {
+        // Arrange: simulates lost/never-sent continuation packets. The first packet on the
+        // SCTE-35 PID starts a section that declares a total length (203 bytes) far larger than
+        // what a single TS packet can carry (183 bytes of section data after the pointer_field),
+        // and no continuation packets for it ever arrive -- the next packet on this PID jumps
+        // straight to a brand-new, complete, genuine section. Per the class's own documented
+        // reasoning, that stale, never-completed fragment must be discarded at the new section's
+        // payload_unit_start boundary rather than left in the buffer: an earlier version left it
+        // there, so the genuine section's real bytes got appended after it and the whole thing
+        // sat forever waiting for a length that could never be satisfied, silently losing the
+        // genuine signal.
+        const int patPid = 0x0000;
+        const int pmtPid = 0x0200;
+        const int scte35Pid = 0x0201;
+        var filePath = Path.Combine(Path.GetTempPath(), $"scte35-incomplete-boundary-{Guid.NewGuid()}.ts");
+
+        try
+        {
+            using (var fs = new FileStream(filePath, FileMode.Create, FileAccess.Write))
+            {
+                var writer = new BinaryWriter(fs);
+                WriteSection(writer, patPid, BuildPatSection(pmtPid));
+                WriteSection(writer, pmtPid, BuildPmtSection(scte35Pid));
+
+                // Stale, never-completed section: pointer_field(1) + table_id+section_length(3,
+                // declaring 200 more bytes than present) + 180 bytes of filler = 184 bytes,
+                // exactly filling one TS packet's payload with no room left for the section to
+                // ever actually complete from this packet alone, and no continuation follows.
+                var stalePayload = new byte[184];
+                stalePayload[0] = 0x00; // pointer_field
+                stalePayload[1] = 0xFC; // table_id (SCTE-35, irrelevant -- never parsed)
+                stalePayload[2] = 0xB0; // section_length high nibble (declared length=200)
+                stalePayload[3] = 0xC8;
+                for (int i = 4; i < stalePayload.Length; i++)
+                {
+                    stalePayload[i] = 0xAA; // arbitrary filler, distinct from 0xFF stuffing
+                }
+
+                WriteRawPacket(writer, scte35Pid, payloadUnitStart: true, transportErrorIndicator: false, stalePayload);
+
+                // A brand-new, genuine, complete section immediately follows -- unrelated to the
+                // stale fragment above.
+                WriteSection(writer, scte35Pid, BuildSpliceInsertSection(eventId: 1, cueOut: false, ptsTime: 180_000));
+
+                writer.Flush();
+            }
+
+            // Act
+            var signals = _extractor.Extract(filePath, CancellationToken.None);
+
+            // Assert
+            var signal = Assert.Single(signals);
+            Assert.Equal(ExplicitMarkerKind.CueIn, signal.Kind);
+            Assert.Equal(DateTimeOffset.UnixEpoch + TimeSpan.FromSeconds(2.0), signal.ObservedAt);
+        }
+        finally
+        {
+            File.Delete(filePath);
+        }
+    }
+
+    [Fact]
+    public void Extract_PatCurrentNextIndicatorZero_ReturnsEmptyList()
+    {
+        // Arrange: current_next_indicator=0 (data[5] bit0) marks this PAT as describing a
+        // not-yet-active table version (e.g. mid version transition) -- ISO/IEC 13818-1. It must
+        // be ignored rather than followed, since the PMT PID it lists may not be the one
+        // actually carrying SCTE-35 data yet.
+        const int patPid = 0x0000;
+        const int pmtPid = 0x0200;
+        const int scte35Pid = 0x0201;
+        var filePath = Path.Combine(Path.GetTempPath(), $"scte35-pat-not-current-{Guid.NewGuid()}.ts");
+
+        try
+        {
+            using (var fs = new FileStream(filePath, FileMode.Create, FileAccess.Write))
+            {
+                var writer = new BinaryWriter(fs);
+                WriteSection(writer, patPid, BuildPatSection(pmtPid, currentNextIndicator: false));
+                WriteSection(writer, pmtPid, BuildPmtSection(scte35Pid));
+                WriteSection(writer, scte35Pid, BuildSpliceInsertSection(eventId: 1, cueOut: true, ptsTime: 90_000));
+
+                writer.Flush();
+            }
+
+            // Act
+            var signals = _extractor.Extract(filePath, CancellationToken.None);
+
+            // Assert
+            Assert.Empty(signals);
+        }
+        finally
+        {
+            File.Delete(filePath);
+        }
+    }
+
+    [Fact]
+    public void Extract_PmtCurrentNextIndicatorZero_ReturnsEmptyList()
+    {
+        // Arrange: same rationale as the PAT case above, applied to the PMT's own
+        // current_next_indicator (also data[5] bit0, per the PMT's own layout).
+        const int patPid = 0x0000;
+        const int pmtPid = 0x0200;
+        const int scte35Pid = 0x0201;
+        var filePath = Path.Combine(Path.GetTempPath(), $"scte35-pmt-not-current-{Guid.NewGuid()}.ts");
+
+        try
+        {
+            using (var fs = new FileStream(filePath, FileMode.Create, FileAccess.Write))
+            {
+                var writer = new BinaryWriter(fs);
+                WriteSection(writer, patPid, BuildPatSection(pmtPid));
+                WriteSection(writer, pmtPid, BuildPmtSection(scte35Pid, currentNextIndicator: false));
+                WriteSection(writer, scte35Pid, BuildSpliceInsertSection(eventId: 1, cueOut: true, ptsTime: 90_000));
+
+                writer.Flush();
+            }
+
+            // Act
+            var signals = _extractor.Extract(filePath, CancellationToken.None);
+
+            // Assert
+            Assert.Empty(signals);
+        }
+        finally
+        {
+            File.Delete(filePath);
+        }
+    }
+
+    private static byte[] BuildPatSection(int pmtPid, bool currentNextIndicator = true) => new byte[]
     {
         0x00,                                                       // table_id
         0xB0, 0x0D,                                                  // section_length=13
         0x00, 0x01,                                                  // transport_stream_id
-        0xC1, 0x00, 0x00,                                            // version/current_next, section_number, last_section_number
+        (byte)(currentNextIndicator ? 0xC1 : 0xC0), 0x00, 0x00,      // version/current_next, section_number, last_section_number
         0x00, 0x01,                                                  // program_number = 1
         (byte)(0xE0 | ((pmtPid >> 8) & 0x1F)), (byte)(pmtPid & 0xFF), // reserved + PMT PID
         0x00, 0x00, 0x00, 0x00,                                      // CRC_32 (unvalidated)
     };
 
-    private static byte[] BuildPmtSection(int scte35Pid) => new byte[]
+    private static byte[] BuildPmtSection(int scte35Pid, bool currentNextIndicator = true) => new byte[]
     {
         0x02,                                                              // table_id
         0xB0, 0x12,                                                         // section_length=18
         0x00, 0x01,                                                         // program_number = 1
-        0xC1, 0x00, 0x00,                                                   // version/current_next, section_number, last_section_number
+        (byte)(currentNextIndicator ? 0xC1 : 0xC0), 0x00, 0x00,             // version/current_next, section_number, last_section_number
         0xE0, 0x00,                                                         // reserved + PCR_PID (unused)
         0xF0, 0x00,                                                         // reserved + program_info_length = 0
         0x86,                                                               // stream_type: SCTE-35
@@ -489,6 +673,46 @@ public class Scte35MarkerExtractorTests
         packet[3] = 0x10; // adaptation_field_control=01 (payload only), continuity_counter=0
 
         int payloadSize = Math.Min(payload.Count, tsPacketSize - 4);
+        for (int i = 0; i < tsPacketSize - 4; i++)
+        {
+            packet[4 + i] = i < payloadSize ? payload[i] : (byte)0xFF; // 0xFF stuffing past the real payload.
+        }
+
+        writer.Write(packet);
+    }
+
+    /// <summary>
+    /// Writes one raw TS packet with full control over payload_unit_start_indicator and
+    /// transport_error_indicator, for tests that need byte-exact control the higher-level
+    /// <see cref="WriteSections"/> helper does not expose (e.g. simulating a corrupted or a
+    /// deliberately non-payload-unit-start packet). <paramref name="payload"/> is copied
+    /// starting right after the 4-byte TS header -- if the caller wants a payload_unit_start
+    /// packet, it must include the pointer_field itself as the payload's first byte, matching
+    /// real MPEG-TS framing (ISO/IEC 13818-1).
+    /// </summary>
+    private static void WriteRawPacket(BinaryWriter writer, int pid, bool payloadUnitStart, bool transportErrorIndicator, byte[] payload)
+    {
+        const int tsPacketSize = 188;
+
+        var packet = new byte[tsPacketSize];
+        packet[0] = 0x47; // sync byte
+
+        ushort pidField = (ushort)(pid & 0x1FFF);
+        if (payloadUnitStart)
+        {
+            pidField |= 0x4000;
+        }
+
+        packet[1] = (byte)((pidField >> 8) & 0xFF);
+        if (transportErrorIndicator)
+        {
+            packet[1] |= 0x80;
+        }
+
+        packet[2] = (byte)(pidField & 0xFF);
+        packet[3] = 0x10; // adaptation_field_control=01 (payload only), continuity_counter=0
+
+        int payloadSize = Math.Min(payload.Length, tsPacketSize - 4);
         for (int i = 0; i < tsPacketSize - 4; i++)
         {
             packet[4 + i] = i < payloadSize ? payload[i] : (byte)0xFF; // 0xFF stuffing past the real payload.

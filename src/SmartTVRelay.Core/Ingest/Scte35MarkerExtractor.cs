@@ -129,9 +129,24 @@ public sealed class Scte35MarkerExtractor
             ushort pidField = (ushort)((packet[1] << 8) | packet[2]);
             ushort pid = (ushort)(pidField & 0x1FFF);
             bool payloadUnitStart = (pidField & 0x4000) != 0;
+            bool transportErrorIndicator = (packet[1] & 0x80) != 0;
 
             if (pid != targetPid)
             {
+                continue;
+            }
+
+            if (transportErrorIndicator)
+            {
+                // At least one uncorrectable bit error in this packet's payload (ISO/IEC
+                // 13818-1). Section CRCs are intentionally not checked anywhere in this class
+                // (see class doc), so a corrupted payload has no other integrity check backing
+                // it up -- using it at all risks a corrupted bit pattern being decoded as a
+                // confident CueOut/CueIn. Discard this packet's contribution entirely, and
+                // invalidate whatever section was in progress for this PID: whether this packet
+                // was meant to start, continue, or complete it, that section can no longer be
+                // trusted.
+                sectionDataLength = 0;
                 continue;
             }
 
@@ -175,10 +190,20 @@ public sealed class Scte35MarkerExtractor
                     }
                 }
 
-                // Whatever is now in sectionData is exactly one complete, finished section (or
-                // nothing, for the very first section ever seen on this PID): the byte right
-                // after the pointer_field's continuation bytes always starts a brand-new section.
+                // Whatever is now in sectionData should be exactly one complete, finished section
+                // (or nothing, for the very first section ever seen on this PID): the byte right
+                // after the pointer_field's continuation bytes always starts a brand-new section,
+                // per the same rule used to compute those continuation bytes above. Any bytes
+                // still left after draining mean the prior section was NOT actually completed by
+                // its own declared pointer_field continuation -- a lost packet, a capture that
+                // began mid-section, or a corrupted stream, not a genuine multi-packet section
+                // (those are only ever continued by payload_unit_start=0 packets, handled below,
+                // never by a pointer_field). That stale, never-to-be-completed fragment must be
+                // discarded here, before the new section's bytes are appended -- otherwise the
+                // new section would be appended onto it and parsed as corrupted evidence, or
+                // silently swallowed entirely.
                 sectionDataLength = DrainCompleteSections(sectionData, sectionDataLength, onSection);
+                sectionDataLength = 0;
 
                 copyFrom = afterPointer + pointerField;
             }
@@ -309,6 +334,15 @@ public sealed class Scte35MarkerExtractor
         // transport_stream_id(2) | reserved+version+current_next_indicator(1) |
         // section_number(1) | last_section_number(1) |
         // [ program_number(2) | reserved+PID(2) ]... | CRC_32(4)
+        if ((data[5] & 0x01) == 0)
+        {
+            // current_next_indicator=0: this table describes a not-yet-active version (e.g.
+            // during a version transition). Following it could point at a PMT PID that isn't
+            // the currently active one, so ignore it and wait for the currently-applicable
+            // table instead.
+            return null;
+        }
+
         const int headerLength = 8;
         int i = headerLength;
         while (i + 4 <= length - 4) // 4 bytes remaining for CRC.
@@ -363,6 +397,14 @@ public sealed class Scte35MarkerExtractor
         // last_section_number(1) | reserved+PCR_PID(2) | reserved+program_info_length(2) |
         // descriptor... | [ stream_type(1) | reserved+PID(2) | reserved+ES_info_length(2) |
         // descriptor... ]... | CRC_32(4)
+        if ((data[5] & 0x01) == 0)
+        {
+            // current_next_indicator=0: not-yet-active table version (e.g. mid version
+            // transition). The stream PID it lists may not be the one actually carrying
+            // SCTE-35 data yet, so ignore it and wait for the currently-applicable table.
+            return null;
+        }
+
         // Bytes consumed before the program_info_length field: table_id(1) + section_length(2)
         // + program_number(2) + version/current_next(1) + section_number(1) +
         // last_section_number(1) + PCR_PID(2) = 10.
