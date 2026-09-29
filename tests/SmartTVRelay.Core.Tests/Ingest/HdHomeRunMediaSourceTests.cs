@@ -437,6 +437,217 @@ public class HdHomeRunMediaSourceTests
     }
 
     [Fact]
+    public void Diagnostics_BeforeAnyRead_IsZeroed()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage());
+        var client = new HttpClient(handler);
+        var source = new HdHomeRunMediaSource(client, "source-1", "http://192.168.0.66", "2.1");
+
+        var diagnostics = source.Diagnostics;
+
+        Assert.Equal("source-1", diagnostics.SourceId);
+        Assert.Equal(SourceHealth.Unknown, diagnostics.Health);
+        Assert.Equal(0, diagnostics.BytesProcessed);
+        Assert.Equal(0, diagnostics.ChunksProcessed);
+        Assert.Null(diagnostics.LastMediaTimestamp);
+        Assert.Equal(0, diagnostics.ProbeErrorCount);
+        Assert.Equal(0, diagnostics.DecodeErrorCount);
+        Assert.Equal(0, diagnostics.ReconnectAttempts);
+    }
+
+    [Fact]
+    public async Task Diagnostics_AfterSuccessfulRead_ReflectsBytesAndChunks()
+    {
+        var lineupJson = @"[{""GuideNumber"":""2.1"",""URL"":""http://192.168.0.66:5004/auto/v2.1""}]";
+        var streamData = new byte[] { 0x47, 0x00, 0x01, 0x02, 0x03 };
+
+        var handler = new FakeHttpMessageHandler(req =>
+        {
+            if (req.RequestUri?.AbsoluteUri.Contains("lineup.json") == true)
+            {
+                return new HttpResponseMessage { StatusCode = System.Net.HttpStatusCode.OK, Content = new StringContent(lineupJson) };
+            }
+
+            return new HttpResponseMessage { StatusCode = System.Net.HttpStatusCode.OK, Content = new ByteArrayContent(streamData) };
+        });
+
+        var client = new HttpClient(handler);
+        var source = new HdHomeRunMediaSource(client, "source-1", "http://192.168.0.66", "2.1");
+
+        await foreach (var _ in source.ReadAsync(CancellationToken.None))
+        {
+        }
+
+        var diagnostics = source.Diagnostics;
+
+        Assert.Equal(streamData.Length, diagnostics.BytesProcessed);
+        Assert.Equal(1, diagnostics.ChunksProcessed);
+        Assert.NotNull(diagnostics.LastMediaTimestamp);
+        Assert.Equal(0, diagnostics.ProbeErrorCount);
+        Assert.Equal(0, diagnostics.DecodeErrorCount);
+    }
+
+    [Fact]
+    public async Task Diagnostics_LineupFetchFailure_IncrementsProbeErrorCountAndIncludesSourceIdInDetail()
+    {
+        var handler = new FakeHttpMessageHandler(req =>
+        {
+            if (req.RequestUri?.AbsoluteUri.Contains("lineup.json") == true)
+            {
+                return new HttpResponseMessage(System.Net.HttpStatusCode.InternalServerError)
+                {
+                    ReasonPhrase = "Internal Server Error",
+                };
+            }
+
+            return new HttpResponseMessage(System.Net.HttpStatusCode.NotFound);
+        });
+
+        var client = new HttpClient(handler);
+        var source = new HdHomeRunMediaSource(client, "correlation-source", "http://192.168.0.66", "2.1");
+
+        async Task Act()
+        {
+            await foreach (var _ in source.ReadAsync(CancellationToken.None)) { }
+        }
+
+        await Assert.ThrowsAsync<InvalidOperationException>(Act);
+
+        var diagnostics = source.Diagnostics;
+        Assert.Equal(1, diagnostics.ProbeErrorCount);
+        Assert.Equal(0, diagnostics.DecodeErrorCount);
+        Assert.NotNull(diagnostics.Detail);
+        Assert.Contains("correlation-source", diagnostics.Detail);
+    }
+
+    [Fact]
+    public async Task Diagnostics_ChannelNotFound_IncrementsProbeErrorCount()
+    {
+        var lineupJson = @"[{""GuideNumber"":""2.1"",""URL"":""http://192.168.0.66:5004/auto/v2.1""}]";
+
+        var handler = new FakeHttpMessageHandler(req =>
+        {
+            var url = req.RequestUri?.AbsoluteUri ?? "";
+            if (url.Contains("lineup.json"))
+            {
+                return new HttpResponseMessage { StatusCode = System.Net.HttpStatusCode.OK, Content = new StringContent(lineupJson) };
+            }
+
+            return new HttpResponseMessage(System.Net.HttpStatusCode.NotFound);
+        });
+
+        var client = new HttpClient(handler);
+        var source = new HdHomeRunMediaSource(client, "source-1", "http://192.168.0.66", "3.1");
+
+        async Task Act()
+        {
+            await foreach (var _ in source.ReadAsync(CancellationToken.None)) { }
+        }
+
+        await Assert.ThrowsAsync<InvalidOperationException>(Act);
+
+        Assert.Equal(1, source.Diagnostics.ProbeErrorCount);
+    }
+
+    [Fact]
+    public async Task Diagnostics_StreamOpenFailure_IncrementsProbeErrorCount()
+    {
+        var lineupJson = @"[{""GuideNumber"":""2.1"",""URL"":""http://192.168.0.66:5004/auto/v2.1""}]";
+
+        var handler = new FakeHttpMessageHandler(req =>
+        {
+            if (req.RequestUri?.AbsoluteUri.Contains("lineup.json") == true)
+            {
+                return new HttpResponseMessage { StatusCode = System.Net.HttpStatusCode.OK, Content = new StringContent(lineupJson) };
+            }
+
+            return new HttpResponseMessage(System.Net.HttpStatusCode.ServiceUnavailable);
+        });
+
+        var client = new HttpClient(handler);
+        var source = new HdHomeRunMediaSource(client, "source-1", "http://192.168.0.66", "2.1");
+
+        async Task Act()
+        {
+            await foreach (var _ in source.ReadAsync(CancellationToken.None)) { }
+        }
+
+        await Assert.ThrowsAsync<InvalidOperationException>(Act);
+
+        Assert.Equal(1, source.Diagnostics.ProbeErrorCount);
+        Assert.Equal(0, source.Diagnostics.DecodeErrorCount);
+    }
+
+    [Fact]
+    public async Task Diagnostics_StreamReadFailure_IncrementsDecodeErrorCountNotProbeErrorCount()
+    {
+        var lineupJson = @"[{""GuideNumber"":""2.1"",""URL"":""http://192.168.0.66:5004/auto/v2.1""}]";
+
+        var handler = new FakeHttpMessageHandler(req =>
+        {
+            if (req.RequestUri?.AbsoluteUri.Contains("lineup.json") == true)
+            {
+                return new HttpResponseMessage { StatusCode = System.Net.HttpStatusCode.OK, Content = new StringContent(lineupJson) };
+            }
+
+            // A response whose content stream throws once read, simulating a mid-stream failure
+            // after the connection was already successfully established.
+            return new HttpResponseMessage
+            {
+                StatusCode = System.Net.HttpStatusCode.OK,
+                Content = new ThrowingContent(),
+            };
+        });
+
+        var client = new HttpClient(handler);
+        var source = new HdHomeRunMediaSource(client, "source-1", "http://192.168.0.66", "2.1");
+
+        async Task Act()
+        {
+            await foreach (var _ in source.ReadAsync(CancellationToken.None)) { }
+        }
+
+        await Assert.ThrowsAsync<IOException>(Act);
+
+        var diagnostics = source.Diagnostics;
+        Assert.Equal(0, diagnostics.ProbeErrorCount);
+        Assert.Equal(1, diagnostics.DecodeErrorCount);
+    }
+
+    /// <summary>HttpContent whose stream throws on the first read, after headers/connection succeed --
+    /// simulating a decode-time failure distinct from a probe/connect-time failure.</summary>
+    private sealed class ThrowingContent : HttpContent
+    {
+        protected override Task SerializeToStreamAsync(Stream stream, System.Net.TransportContext? context) =>
+            throw new IOException("Simulated mid-stream read failure");
+
+        protected override Task<Stream> CreateContentReadStreamAsync() =>
+            Task.FromResult<Stream>(new ThrowingStream());
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = 0;
+            return false;
+        }
+
+        private sealed class ThrowingStream : Stream
+        {
+            public override bool CanRead => true;
+            public override bool CanSeek => false;
+            public override bool CanWrite => false;
+            public override long Length => throw new NotSupportedException();
+            public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+            public override void Flush() { }
+            public override int Read(byte[] buffer, int offset, int count) => throw new IOException("Simulated mid-stream read failure");
+            public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
+                throw new IOException("Simulated mid-stream read failure");
+            public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+            public override void SetLength(long value) => throw new NotSupportedException();
+            public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        }
+    }
+
+    [Fact]
     public async Task ReadAsync_ChannelNotFoundMessageIncludesDeviceUrl()
     {
         var lineupJson = @"[{""GuideNumber"":""2.1"",""URL"":""http://192.168.0.66:5004/auto/v2.1""}]";

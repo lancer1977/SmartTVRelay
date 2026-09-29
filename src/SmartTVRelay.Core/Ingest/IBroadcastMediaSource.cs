@@ -13,6 +13,12 @@ public interface IBroadcastMediaSource : IAsyncDisposable
     /// <summary>Current health/status of the source, independent of whether a read is in progress.</summary>
     SourceStatus Status { get; }
 
+    /// <summary>Structured ingest diagnostics for this source (#35) -- throughput/progress, error
+    /// counts, and correlation info, in addition to the coarse <see cref="Status"/>. Reflects
+    /// whatever has been read so far; a fresh source (nothing read yet) reports zeroed counters
+    /// and a <see langword="null"/> <see cref="IngestDiagnostics.LastMediaTimestamp"/>.</summary>
+    IngestDiagnostics Diagnostics { get; }
+
     /// <summary>Streams chunks with source-relative timestamps starting at <see cref="TimeSpan.Zero"/>.
     /// The enumerable completes normally when the source reaches a natural end (a recorded file is
     /// exhausted); it does not throw to signal end-of-stream. A live source instead keeps yielding until
