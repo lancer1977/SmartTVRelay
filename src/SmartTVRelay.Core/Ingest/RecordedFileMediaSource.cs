@@ -11,6 +11,9 @@ public sealed class RecordedFileMediaSource : IBroadcastMediaSource
     private readonly string filePath;
     private readonly int chunkSizeBytes;
     private readonly TimeSpan chunkInterval;
+    private long bytesProcessed;
+    private long chunksProcessed;
+    private TimeSpan? lastMediaTimestamp;
 
     /// <summary>
     /// Creates a <see cref="RecordedFileMediaSource"/> for a local MPEG-TS file.
@@ -51,12 +54,35 @@ public sealed class RecordedFileMediaSource : IBroadcastMediaSource
     public SourceStatus Status => new(SourceHealth.Healthy);
 
     /// <summary>
+    /// Structured ingest diagnostics (#35) for the most recent (or in-progress) <see cref="ReadAsync"/>
+    /// call. Counters reset at the start of each new read, so a repeated read of the same file (this
+    /// class explicitly supports being read multiple times) reports that read's own progress rather
+    /// than an accumulation across reads. Recorded files never probe/decode-fail or reconnect --
+    /// reading raw bytes from an already-open local file has no such failure modes -- so those
+    /// counters are always 0.
+    /// </summary>
+    public IngestDiagnostics Diagnostics => new(
+        SourceId,
+        SourceHealth.Healthy,
+        Detail: null,
+        bytesProcessed,
+        chunksProcessed,
+        lastMediaTimestamp,
+        ProbeErrorCount: 0,
+        DecodeErrorCount: 0,
+        ReconnectAttempts: 0);
+
+    /// <summary>
     /// Streams chunks of raw bytes from the file, with deterministic timestamps.
     /// Completes normally (no exception) when EOF is reached; honors <paramref name="cancellationToken"/>
     /// by throwing <see cref="OperationCanceledException"/> if cancellation is requested between chunks.
     /// </summary>
     public async IAsyncEnumerable<MediaChunk> ReadAsync([EnumeratorCancellation] CancellationToken cancellationToken)
     {
+        bytesProcessed = 0;
+        chunksProcessed = 0;
+        lastMediaTimestamp = null;
+
         // Open the file fresh on each read, in case the same source is read multiple times.
         using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: chunkSizeBytes, useAsync: true);
 
@@ -75,6 +101,14 @@ public sealed class RecordedFileMediaSource : IBroadcastMediaSource
             }
 
             var sourceTime = TimeSpan.FromTicks(chunkIndex * chunkInterval.Ticks);
+
+            // Updated before yielding, not after, so Diagnostics already reflects this chunk by
+            // the time the caller observes it (a caller inspecting Diagnostics from inside its own
+            // consumption of the yielded chunk should see it counted, not lag one chunk behind).
+            bytesProcessed += bytesRead;
+            chunksProcessed++;
+            lastMediaTimestamp = sourceTime;
+
             yield return new MediaChunk(buffer[..bytesRead], sourceTime);
 
             chunkIndex++;

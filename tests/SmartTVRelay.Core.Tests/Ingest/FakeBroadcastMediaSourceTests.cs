@@ -84,6 +84,41 @@ public class FakeBroadcastMediaSourceTests
     }
 
     [Fact]
+    public void Diagnostics_DefaultsToZeroedDerivedFromStatus()
+    {
+        var source = new FakeBroadcastMediaSource("test-source", Array.Empty<MediaChunk>());
+
+        var diagnostics = source.Diagnostics;
+
+        Assert.Equal("test-source", diagnostics.SourceId);
+        Assert.Equal(SourceHealth.Healthy, diagnostics.Health);
+        Assert.Equal(0, diagnostics.BytesProcessed);
+        Assert.Equal(0, diagnostics.ChunksProcessed);
+        Assert.Null(diagnostics.LastMediaTimestamp);
+        Assert.Equal(0, diagnostics.ProbeErrorCount);
+        Assert.Equal(0, diagnostics.DecodeErrorCount);
+        Assert.Equal(0, diagnostics.ReconnectAttempts);
+    }
+
+    [Fact]
+    public void Diagnostics_CanBeInjected()
+    {
+        var diagnostics = new IngestDiagnostics(
+            "test-source",
+            SourceHealth.Degraded,
+            "reconnecting",
+            BytesProcessed: 4096,
+            ChunksProcessed: 4,
+            LastMediaTimestamp: TimeSpan.FromSeconds(3),
+            ProbeErrorCount: 1,
+            DecodeErrorCount: 2,
+            ReconnectAttempts: 1);
+        var source = new FakeBroadcastMediaSource("test-source", Array.Empty<MediaChunk>(), diagnostics: diagnostics);
+
+        Assert.Same(diagnostics, source.Diagnostics);
+    }
+
+    [Fact]
     public async Task DisposeAsync_MarksDisposed()
     {
         var source = new FakeBroadcastMediaSource("test-source", Array.Empty<MediaChunk>());

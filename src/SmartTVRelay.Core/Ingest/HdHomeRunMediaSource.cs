@@ -17,6 +17,11 @@ public sealed class HdHomeRunMediaSource : IBroadcastMediaSource
     private readonly string channelGuideNumber;
     private Stream? currentStream;
     private HttpResponseMessage? currentResponse;
+    private long bytesProcessed;
+    private long chunksProcessed;
+    private TimeSpan? lastMediaTimestamp;
+    private int probeErrorCount;
+    private int decodeErrorCount;
 
     public HdHomeRunMediaSource(HttpClient httpClient, string sourceId, string baseUrl, string channelGuideNumber)
     {
@@ -36,6 +41,24 @@ public sealed class HdHomeRunMediaSource : IBroadcastMediaSource
 
     public SourceStatus Status { get; private set; }
 
+    /// <summary>
+    /// Structured ingest diagnostics (#35), reflecting the current/most recent <see cref="ReadAsync"/>
+    /// attempt. <c>ReconnectAttempts</c> is always 0: this class does not retry on failure today (a
+    /// connectivity or read failure surfaces once via <c>ProbeErrorCount</c>/<c>DecodeErrorCount</c>
+    /// and the read ends) -- see <see cref="IngestDiagnostics.ReconnectAttempts"/> for why the field
+    /// still exists.
+    /// </summary>
+    public IngestDiagnostics Diagnostics => new(
+        SourceId,
+        Status.Health,
+        Status.Detail,
+        bytesProcessed,
+        chunksProcessed,
+        lastMediaTimestamp,
+        probeErrorCount,
+        decodeErrorCount,
+        ReconnectAttempts: 0);
+
     public async IAsyncEnumerable<MediaChunk> ReadAsync([EnumeratorCancellation] CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -49,7 +72,8 @@ public sealed class HdHomeRunMediaSource : IBroadcastMediaSource
 
             if (!lineupResponse.IsSuccessStatusCode)
             {
-                var detail = $"Failed to reach HDHomeRun lineup at {lineupUrl}: HTTP {(int)lineupResponse.StatusCode} {lineupResponse.ReasonPhrase}";
+                var detail = $"[{SourceId}] Failed to reach HDHomeRun lineup at {lineupUrl}: HTTP {(int)lineupResponse.StatusCode} {lineupResponse.ReasonPhrase}";
+                probeErrorCount++;
                 Status = new SourceStatus(SourceHealth.Unavailable, detail);
                 throw new InvalidOperationException(detail);
             }
@@ -60,7 +84,8 @@ public sealed class HdHomeRunMediaSource : IBroadcastMediaSource
             selectedChannel = lineup.FirstOrDefault(c => c.GuideNumber == channelGuideNumber);
             if (selectedChannel is null)
             {
-                var detail = $"Channel '{channelGuideNumber}' not found in lineup at {baseUrl}";
+                var detail = $"[{SourceId}] Channel '{channelGuideNumber}' not found in lineup at {baseUrl}";
+                probeErrorCount++;
                 Status = new SourceStatus(SourceHealth.Unavailable, detail);
                 throw new InvalidOperationException(detail);
             }
@@ -75,7 +100,8 @@ public sealed class HdHomeRunMediaSource : IBroadcastMediaSource
         }
         catch (Exception ex)
         {
-            var detail = $"Failed to reach HDHomeRun lineup at {baseUrl}/lineup.json: {ex.Message}";
+            var detail = $"[{SourceId}] Failed to reach HDHomeRun lineup at {baseUrl}/lineup.json: {ex.Message}";
+            probeErrorCount++;
             Status = new SourceStatus(SourceHealth.Unavailable, detail);
             throw new InvalidOperationException(detail, ex);
         }
@@ -92,7 +118,8 @@ public sealed class HdHomeRunMediaSource : IBroadcastMediaSource
 
             if (!streamResponse.IsSuccessStatusCode)
             {
-                var detail = $"Failed to open stream at {selectedChannel.URL}: HTTP {(int)streamResponse.StatusCode}";
+                var detail = $"[{SourceId}] Failed to open stream at {selectedChannel.URL}: HTTP {(int)streamResponse.StatusCode}";
+                probeErrorCount++;
                 Status = new SourceStatus(SourceHealth.Unavailable, detail);
                 throw new InvalidOperationException(detail);
             }
@@ -116,7 +143,8 @@ public sealed class HdHomeRunMediaSource : IBroadcastMediaSource
                 }
                 catch (Exception ex) when (!(ex is OperationCanceledException))
                 {
-                    var detail = $"Stream read failed from {selectedChannel.URL}: {ex.Message}";
+                    var detail = $"[{SourceId}] Stream read failed from {selectedChannel.URL}: {ex.Message}";
+                    decodeErrorCount++;
                     Status = new SourceStatus(SourceHealth.Unavailable, detail);
                     throw;
                 }
@@ -132,6 +160,13 @@ public sealed class HdHomeRunMediaSource : IBroadcastMediaSource
                 // whatever the next read overwrites it with, corrupting every previously-yielded
                 // chunk's Data as soon as the consumer stops holding the enumerator at that item.
                 var chunk = new MediaChunk(buffer[..bytesRead], stopwatch.Elapsed);
+
+                // Updated before yielding, matching RecordedFileMediaSource's convention, so a
+                // caller inspecting Diagnostics while consuming this chunk sees it already counted.
+                bytesProcessed += bytesRead;
+                chunksProcessed++;
+                lastMediaTimestamp = chunk.SourceTime;
+
                 yield return chunk;
             }
         }

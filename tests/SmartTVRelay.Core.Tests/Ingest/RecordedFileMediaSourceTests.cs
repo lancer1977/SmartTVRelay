@@ -356,6 +356,94 @@ public class RecordedFileMediaSourceTests
     }
 
     [Fact]
+    public void Diagnostics_BeforeAnyRead_IsZeroed()
+    {
+        var tempFile = Path.GetTempFileName();
+        try
+        {
+            var source = new RecordedFileMediaSource("diag-source", tempFile);
+
+            var diagnostics = source.Diagnostics;
+
+            Assert.Equal("diag-source", diagnostics.SourceId);
+            Assert.Equal(SourceHealth.Healthy, diagnostics.Health);
+            Assert.Equal(0, diagnostics.BytesProcessed);
+            Assert.Equal(0, diagnostics.ChunksProcessed);
+            Assert.Null(diagnostics.LastMediaTimestamp);
+            Assert.Equal(0, diagnostics.ProbeErrorCount);
+            Assert.Equal(0, diagnostics.DecodeErrorCount);
+            Assert.Equal(0, diagnostics.ReconnectAttempts);
+        }
+        finally
+        {
+            File.Delete(tempFile);
+        }
+    }
+
+    [Fact]
+    public async Task Diagnostics_AfterFullRead_ReflectsBytesChunksAndLastTimestamp()
+    {
+        // Arrange: 3 chunks of 1024 bytes each, default 100ms chunk interval.
+        var tempFile = Path.GetTempFileName();
+        try
+        {
+            int chunkSize = 1024;
+            var data = new byte[chunkSize * 3];
+            await File.WriteAllBytesAsync(tempFile, data);
+            var source = new RecordedFileMediaSource("diag-source", tempFile, chunkSize);
+
+            await foreach (var _ in source.ReadAsync(CancellationToken.None))
+            {
+                // Consume all chunks.
+            }
+
+            var diagnostics = source.Diagnostics;
+
+            Assert.Equal(data.Length, diagnostics.BytesProcessed);
+            Assert.Equal(3, diagnostics.ChunksProcessed);
+            Assert.Equal(TimeSpan.FromMilliseconds(200), diagnostics.LastMediaTimestamp);
+            Assert.Equal(0, diagnostics.ProbeErrorCount);
+            Assert.Equal(0, diagnostics.DecodeErrorCount);
+        }
+        finally
+        {
+            File.Delete(tempFile);
+        }
+    }
+
+    [Fact]
+    public async Task Diagnostics_SecondRead_ResetsCountersRatherThanAccumulating()
+    {
+        // Arrange: an earlier version might have kept accumulating across independent reads of the
+        // same reusable source (see ReadAsync_CanBeCalledMultipleTimes) instead of reflecting only
+        // the most recent read's own progress.
+        var tempFile = Path.GetTempFileName();
+        try
+        {
+            await File.WriteAllBytesAsync(tempFile, new byte[] { 1, 2, 3, 4, 5 });
+            var source = new RecordedFileMediaSource("diag-source", tempFile, chunkSizeBytes: 5);
+
+            await foreach (var _ in source.ReadAsync(CancellationToken.None))
+            {
+            }
+
+            await foreach (var _ in source.ReadAsync(CancellationToken.None))
+            {
+            }
+
+            var diagnostics = source.Diagnostics;
+
+            // If counters accumulated across both reads instead of resetting, this would be 10, not 5.
+            Assert.Equal(5, diagnostics.BytesProcessed);
+            Assert.Equal(1, diagnostics.ChunksProcessed);
+        }
+        finally
+        {
+            File.Delete(tempFile);
+        }
+    }
+
+    [Fact]
     public async Task DisposeAsync_AfterFullRead_DoesNotThrow()
     {
         // Arrange: read a file completely, then dispose.
