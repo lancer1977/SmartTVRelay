@@ -121,6 +121,29 @@ public sealed class DelayBuffer : IDisposable
         }
     }
 
+    /// <summary>Dequeues the oldest buffered chunk unconditionally, ignoring the delay gate.
+    /// Intended for end-of-stream draining once the caller knows no further chunks will ever be
+    /// enqueued -- the delay gate exists to hold back live content until it has aged relative to
+    /// newer content that keeps arriving, which no longer applies once nothing more is coming.
+    /// Returns <see langword="false"/> only when the buffer is empty.</summary>
+    public bool TryDrainAny(out MediaChunk chunk)
+    {
+        ThrowIfDisposed();
+
+        lock (_gate)
+        {
+            if (_chunks.Count == 0)
+            {
+                chunk = default!;
+                return false;
+            }
+
+            chunk = _chunks.Dequeue();
+            _bufferedBytes -= chunk.Data.Length;
+            return true;
+        }
+    }
+
     /// <summary>Convenience helper that enqueues every chunk read from <paramref name="source"/> until
     /// the sequence completes or <paramref name="cancellationToken"/> is triggered.</summary>
     public async Task FillFromAsync(IAsyncEnumerable<MediaChunk> source, CancellationToken cancellationToken = default)
