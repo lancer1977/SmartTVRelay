@@ -270,7 +270,7 @@ public sealed class FrameAudioSampler
                         // Compute delta from previous level (0.0 for first window)
                         double loudnessDeltaDb = previousLevel.HasValue ? currentLevel - previousLevel.Value : 0.0;
 
-                        yield return new AudioLoudnessSample(loudnessDeltaDb, capturedAt);
+                        yield return new AudioLoudnessSample(loudnessDeltaDb, capturedAt, currentLevel);
 
                         previousLevel = currentLevel;
                     }
