@@ -77,16 +77,72 @@ harness that calls the real compiled `Scte35MarkerExtractor` directly and prints
 PID/stream-type/signal values, not just by re-running the test suite (which, prior to fix #4,
 could not have caught #1-#3 at all).
 
+## Bugs found and fixed on re-review (PR #70 automated review)
+
+A second, independent review pass (before merge) found five more real defects, all confirmed by
+hand-tracing the bit layout against the ANSI/SCTE 35 and ISO/IEC 13818-1 specs:
+
+5. **`splice_event_cancel_indicator` and the flags shared one byte (P1).** In a
+   standards-compliant `splice_insert()`, `splice_event_cancel_indicator` is bit 7 of its own
+   byte (the remaining 7 bits are reserved); `out_of_network_indicator`, `program_splice_flag`,
+   `duration_flag`, and `splice_immediate_flag` are bits 7-4 of the *next* byte, present only
+   when `splice_event_cancel_indicator=0`. The original code read all five flags from the single
+   byte immediately after `splice_event_id`, so the normal all-zero reserved-bit pattern in that
+   byte was interpreted as the flags themselves while the real flags and `splice_time()` were
+   read one byte out of alignment -- a real CueIn could be misread as a high-confidence CueOut
+   (or vice versa). Fixed by reading `splice_event_cancel_indicator` from its own byte and the
+   four flags from the following byte.
+6. **`pts_adjustment` was read for nothing (P2).** `splice_info_section()`'s header carries a
+   33-bit `pts_adjustment` in the same 5 bytes previously used only to check `encrypted_packet`.
+   The effective splice time is `(pts_time + pts_adjustment) mod 2^33`, not `pts_time` alone.
+   Fixed by extracting `pts_adjustment` (same plain-33-bit layout as `pts_time`, reusing
+   `ExtractPtsTime33`) and adding it to `pts_time` before converting to a timestamp.
+7. **Immediate/unspecified splices fabricated a wrong timestamp (P1).** When
+   `splice_immediate_flag=1`, or `time_specified_flag=0`, no timestamp exists in the section at
+   all. The original code fell back to `DateTimeOffset.UtcNow` at parse time -- but `Extract`
+   only ever parses recorded files, so "now" has no relationship to the file's actual broadcast
+   time. Emitting this as a signal risked promoting stale/unrelated timing into fresh,
+   high-confidence commercial-replacement evidence, which is exactly the failure this project's
+   design rule says is worse than showing some commercials. Fixed by emitting **no signal** in
+   either case rather than a fabricated one. This supersedes limitation 5 below: it is no longer
+   a caveat about a suspect value, because no value is produced at all.
+8. **`pointer_field` continuation bytes were discarded (P2).** When a `payload_unit_start`
+   packet's `pointer_field` is nonzero, the bytes between it and the next section boundary
+   finish the section already in progress, not the new one. The original code finalized the
+   in-progress section *before* reading those bytes, then skipped over them entirely, silently
+   truncating any PAT/PMT/SCTE-35 section that happens to span exactly that packet boundary.
+   Fixed by appending those continuation bytes to the in-progress section before finalizing it.
+   This is a rare-in-practice edge case (our real capture's sections all have `pointer_field=0`)
+   but a real spec violation.
+9. **Command parsing was bounded against the 4096-byte scratch buffer, not the section (P2).**
+   `TryParseSpliceInsert` checked bounds against the full backing array length rather than the
+   validated section end or the declared `splice_command_length`, so a truncated or malformed
+   section could still read packet stuffing or stale bytes from a previous section as if they
+   were real command data, instead of the promised empty result. Fixed by computing the
+   command's actual end from the section length and the declared `splice_command_length` (or the
+   section end, when the spec's `0xFFF` "length not specified" sentinel is used) and bounding all
+   reads against that.
+
+All five were fixed together, and the hand-crafted independent-oracle test
+(`Extract_HandCraftedSpecCompliantSection_DecodesCorrectPtsTime`) and the checked-in synthetic
+fixture were both updated to the corrected two-byte flags layout -- both previously encoded the
+same collapsed-single-byte bug the parser had, so neither would have caught it. New tests
+(`Extract_ImmediateSplice_EmitsNoSignal`, `Extract_UnspecifiedSpliceTime_EmitsNoSignal`,
+`Extract_WithPtsAdjustment_AppliesItToTheObservedTime`) pin fixes 6 and 7.
+
 ## Known Limitations (intentional, not bugs)
 
 1. **No CRC validation** -- sections are parsed but `CRC_32` is not verified.
 2. **No `encrypted_packet` support** -- encrypted sections are skipped safely (no signal emitted).
 3. **No component-splice-per-PID** -- only program-splice (`program_splice_flag=1`) is handled.
 4. **No duration/avail fields** -- descriptors beyond the `splice_insert` command itself are ignored.
-5. **Immediate splices (`splice_immediate_flag=1`)** -- no timestamp is present in the section at
-   all in this case; the extractor falls back to `DateTimeOffset.UtcNow` at parse time. **This is
-   not the actual broadcast time** and is a real gap, not a nice-to-have caveat, for any pipeline
-   that cares about immediate-splice timing specifically.
+5. **Immediate splices (`splice_immediate_flag=1`) and unspecified `splice_time()`
+   (`time_specified_flag=0`)** -- no timestamp is present in the section at all in either case;
+   the extractor emits **no signal** for these rather than a fabricated one (see "Bugs found and
+   fixed on re-review" #7 above -- this used to fall back to `DateTimeOffset.UtcNow`, which is
+   not the actual broadcast time for a recorded file). A pipeline that needs immediate-splice
+   timing specifically would need to track the packet's own source position/PCR baseline, which
+   this prototype does not do.
 6. **No other `splice_command_type`s** -- `time_signal`, `bandwidth_reservation`,
    `private_command`, etc. are silently ignored (no signal emitted, no error).
 7. **PTS-domain timestamps, not wall-clock.** `pts_time` is in the stream's own 90kHz PTS/PCR

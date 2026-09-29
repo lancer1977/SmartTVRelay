@@ -12,9 +12,11 @@ using System.Threading;
 ///
 /// Supports splice_insert (command_type 0x05) only. Other splice_command_types are safely ignored.
 /// No CRC validation, no encrypted_packet support, no component-splice-per-PID variants, no
-/// duration/avail descriptor fields. Immediate splices (splice_immediate_flag=1) have no
-/// timestamp in the section and fall back to DateTimeOffset.UtcNow at parse time -- this is
-/// NOT the actual broadcast time and is a known limitation (see docs/scte35-findings.md).
+/// duration/avail descriptor fields. Immediate splices (splice_immediate_flag=1), and any
+/// splice_time() with time_specified_flag=0, carry no reliable timestamp in the section at all.
+/// Since this class only parses recorded files, DateTimeOffset.UtcNow at parse time has no
+/// relationship to broadcast time, so these cases emit no signal rather than a fabricated one
+/// (see docs/scte35-findings.md).
 ///
 /// Every PSI-style section here (PAT, PMT, and the private SCTE-35 section) is preceded, on the
 /// packet where payload_unit_start_indicator=1, by a mandatory single-byte pointer_field before
@@ -139,22 +141,37 @@ public sealed class Scte35MarkerExtractor
 
             if (payloadUnitStart)
             {
-                if (sectionDataLength > 0)
-                {
-                    onSection(sectionData, sectionDataLength);
-                    sectionDataLength = 0;
-                }
-
                 // The first byte of a payload_unit_start packet's payload is always a
-                // pointer_field: the number of bytes to skip before the new section begins
-                // (almost always 0 in practice, but must still be read, not assumed).
+                // pointer_field: the number of bytes, immediately following it, that finish the
+                // section already in progress (almost always 0 in practice, but must still be
+                // read, not assumed) -- ISO/IEC 13818-1. Those continuation bytes belong to the
+                // PRIOR section, not the new one that starts right after them, so they must be
+                // appended before that section is finalized.
                 if (copyFrom >= TS_PACKET_SIZE)
                 {
                     continue;
                 }
 
                 byte pointerField = packet[copyFrom];
-                copyFrom += 1 + pointerField;
+                int afterPointer = copyFrom + 1;
+
+                if (pointerField > 0 && sectionDataLength > 0 && afterPointer < TS_PACKET_SIZE)
+                {
+                    int continueSize = Math.Min(pointerField, Math.Min(TS_PACKET_SIZE - afterPointer, sectionData.Length - sectionDataLength));
+                    if (continueSize > 0)
+                    {
+                        Array.Copy(packet, afterPointer, sectionData, sectionDataLength, continueSize);
+                        sectionDataLength += continueSize;
+                    }
+                }
+
+                if (sectionDataLength > 0)
+                {
+                    onSection(sectionData, sectionDataLength);
+                    sectionDataLength = 0;
+                }
+
+                copyFrom = afterPointer + pointerField;
             }
 
             if (copyFrom >= TS_PACKET_SIZE)
@@ -339,11 +356,19 @@ public sealed class Scte35MarkerExtractor
             return; // Section header claims more data than we have -- truncated/malformed.
         }
 
+        int sectionEnd = 3 + sectionLength; // Exclusive end of this section's declared content.
+
         byte encryptedPacket = (byte)((data[4] >> 7) & 0x01);
         if (encryptedPacket != 0)
         {
             return; // Encrypted packets are out of scope for this prototype.
         }
+
+        // pts_adjustment: a plain 33-bit field (no marker bits, same layout as splice_time()'s
+        // pts_time) spanning the low bit of data[4] through data[8]. The effective splice time
+        // is (pts_time + pts_adjustment) mod 2^33 -- applying it here, not just reading
+        // encrypted_packet out of the same 5 bytes, per ANSI/SCTE 35.
+        ulong ptsAdjustment = ExtractPtsTime33(data, 4);
 
         byte spliceCommandType = data[commandTypeIndex];
         if (spliceCommandType != SPLICE_INSERT_COMMAND)
@@ -351,91 +376,115 @@ public sealed class Scte35MarkerExtractor
             return; // Only splice_insert is handled; other command types are safely ignored.
         }
 
-        TryParseSpliceInsert(data, commandTypeIndex + 1, signals);
+        // tier(12 bits) + splice_command_length(12 bits): data[10..12]. 0xFFF is the spec's
+        // "length not specified" sentinel; fall back to the section's own declared bound then.
+        const int UnknownCommandLength = 0xFFF;
+        int spliceCommandLength = ((data[11] & 0x0F) << 8) | data[12];
+        int commandStart = commandTypeIndex + 1;
+        int commandEnd = Math.Min(length, sectionEnd);
+        if (spliceCommandLength != UnknownCommandLength)
+        {
+            commandEnd = Math.Min(commandEnd, commandStart + spliceCommandLength);
+        }
+
+        TryParseSpliceInsert(data, commandStart, commandEnd, ptsAdjustment, signals);
     }
 
-    private static void TryParseSpliceInsert(byte[] data, int startIndex, List<ExplicitMarkerSignal> signals)
+    private static void TryParseSpliceInsert(byte[] data, int startIndex, int commandEnd, ulong ptsAdjustment, List<ExplicitMarkerSignal> signals)
     {
         // splice_insert() (fields actually needed for CueOut/CueIn detection; duration,
         // component-splice-per-PID, and avail fields are intentionally not parsed):
         //   splice_event_id                                   32 bits (4 bytes)
-        //   splice_event_cancel_indicator                      1 bit
-        //   out_of_network_indicator                           1 bit
-        //   program_splice_flag                                1 bit
-        //   duration_flag                                      1 bit
-        //   splice_immediate_flag                              1 bit
-        //   reserved                                           3 bits
-        //   -- the above 8 bits form exactly 1 byte --
+        //   splice_event_cancel_indicator                      1 bit  ) byte A: bit7 + reserved(7)
+        //   reserved                                           7 bits )
+        //   -- the rest is only present when splice_event_cancel_indicator == 0 --
+        //   out_of_network_indicator                           1 bit  ) byte B: bit7..bit4
+        //   program_splice_flag                                1 bit  )        + reserved(4)
+        //   duration_flag                                      1 bit  )
+        //   splice_immediate_flag                              1 bit  )
+        //   reserved                                           4 bits )
         //   if (program_splice_flag && !splice_immediate_flag) splice_time()
         int i = startIndex;
-        if (i + 5 > data.Length)
+        if (i + 4 > commandEnd)
         {
-            return; // Too short for splice_event_id + the flags byte.
+            return; // Too short for splice_event_id.
         }
 
         i += 4; // Skip splice_event_id.
 
-        byte flagsByte = data[i];
+        if (i >= commandEnd)
+        {
+            return; // Truncated before the cancel-indicator byte.
+        }
+
+        byte cancelByte = data[i];
         i++;
 
-        bool spliceEventCancelIndicator = (flagsByte & 0x80) != 0;
-        bool outOfNetworkIndicator = (flagsByte & 0x40) != 0;
-        bool programSpliceFlag = (flagsByte & 0x20) != 0;
-        bool spliceImmediateFlag = (flagsByte & 0x10) != 0;
-
+        bool spliceEventCancelIndicator = (cancelByte & 0x80) != 0;
         if (spliceEventCancelIndicator)
         {
             return; // Event cancelled: nothing to signal.
         }
 
+        if (i >= commandEnd)
+        {
+            return; // Truncated before the flags byte.
+        }
+
+        byte flagsByte = data[i];
+        i++;
+
+        bool outOfNetworkIndicator = (flagsByte & 0x80) != 0;
+        bool programSpliceFlag = (flagsByte & 0x40) != 0;
+        bool spliceImmediateFlag = (flagsByte & 0x10) != 0;
+
         ExplicitMarkerKind kind = outOfNetworkIndicator ? ExplicitMarkerKind.CueOut : ExplicitMarkerKind.CueIn;
-        DateTimeOffset observedAt;
 
-        if (programSpliceFlag && !spliceImmediateFlag)
+        if (!programSpliceFlag || spliceImmediateFlag)
         {
-            // splice_time() is present: 1 bit time_specified_flag, then either a 33-bit
-            // pts_time (sharing the remainder of the first byte) or 7 reserved bits.
-            if (i >= data.Length)
-            {
-                return; // Truncated before splice_time().
-            }
-
-            byte firstTimeByte = data[i];
-            bool timeSpecified = (firstTimeByte & 0x80) != 0;
-
-            if (!timeSpecified)
-            {
-                // No pts_time in this section; nothing reliable to timestamp with.
-                observedAt = DateTimeOffset.UtcNow;
-            }
-            else
-            {
-                if (i + 4 >= data.Length)
-                {
-                    return; // Truncated mid-pts_time.
-                }
-
-                ulong ptsTime = ExtractPtsTime33(data, i);
-                observedAt = DateTimeOffset.UnixEpoch + TimeSpan.FromSeconds(ptsTime / 90000.0);
-            }
+            // No splice_time() is present for this case (component-splice-per-PID, out of
+            // scope; or an immediate splice, which is defined as having no scheduled time at
+            // all). This extractor only parses recorded files, so wall-clock "now" at parse
+            // time has no relationship to broadcast time -- emit nothing rather than a
+            // fabricated, wrongly-timed signal (see docs/scte35-findings.md).
+            return;
         }
-        else
+
+        // splice_time() is present: 1 bit time_specified_flag, then either a 33-bit
+        // pts_time (sharing the remainder of the first byte) or 7 reserved bits.
+        if (i >= commandEnd)
         {
-            // splice_immediate_flag=1 (or program_splice_flag=0, out of scope): no timestamp
-            // is present in the section at all. Fall back to wall-clock time at parse time --
-            // this is NOT the actual broadcast time and is a documented limitation.
-            observedAt = DateTimeOffset.UtcNow;
+            return; // Truncated before splice_time().
         }
+
+        byte firstTimeByte = data[i];
+        bool timeSpecified = (firstTimeByte & 0x80) != 0;
+
+        if (!timeSpecified)
+        {
+            // No pts_time in this section either: same rationale as above, emit nothing.
+            return;
+        }
+
+        if (i + 4 >= commandEnd)
+        {
+            return; // Truncated mid-pts_time.
+        }
+
+        ulong ptsTime = ExtractPtsTime33(data, i);
+        ulong adjustedPtsTime = (ptsTime + ptsAdjustment) & 0x1FFFFFFFFUL; // mod 2^33, per spec.
+        var observedAt = DateTimeOffset.UnixEpoch + TimeSpan.FromSeconds(adjustedPtsTime / 90000.0);
 
         signals.Add(new ExplicitMarkerSignal(kind, observedAt));
     }
 
     /// <summary>
-    /// Extracts the 33-bit pts_time value from a 5-byte splice_time() field where
-    /// time_specified_flag has already been confirmed set. Unlike the PES optional-PTS header
-    /// field, splice_time()'s pts_time has NO marker bits interspersed -- it is a plain 33-bit
-    /// unsigned integer: bit 0 of the first byte is pts_time's MSB (bit 32), and the following
-    /// 4 bytes are its remaining 32 bits, big-endian.
+    /// Extracts a plain 33-bit unsigned big-endian value from 5 bytes starting at
+    /// <paramref name="startIndex"/>: bit 0 of the first byte is the value's MSB (bit 32), and
+    /// the following 4 bytes are its remaining 32 bits. Used for both splice_time()'s pts_time
+    /// (caller must confirm time_specified_flag first) and pts_adjustment, which share this
+    /// exact layout in ANSI/SCTE 35. Unlike the PES optional-PTS header field, neither has any
+    /// marker bits interspersed.
     /// </summary>
     private static ulong ExtractPtsTime33(byte[] data, int startIndex)
     {

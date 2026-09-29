@@ -113,12 +113,16 @@ public class Scte35FixtureGenerator
             0x00, 0x00, 0x00, 0x01, // splice_event_id
         };
 
-        // splice_event_cancel_indicator(0) out_of_network_indicator program_splice_flag(1)
-        // duration_flag(0) splice_immediate_flag(0) reserved(000)
-        byte flagsByte = 0x20; // program_splice_flag=1
+        // splice_event_cancel_indicator(0) + reserved(7): its own byte, per ANSI/SCTE 35 --
+        // the flags below are a SEPARATE byte that only exists when cancel_indicator=0.
+        spliceInsert.Add(0x00);
+
+        // out_of_network_indicator + program_splice_flag(1) + duration_flag(0) +
+        // splice_immediate_flag(0) + reserved(0000).
+        byte flagsByte = 0x40; // program_splice_flag=1 (bit6)
         if (cueOut)
         {
-            flagsByte |= 0x40; // out_of_network_indicator=1
+            flagsByte |= 0x80; // out_of_network_indicator=1 (bit7)
         }
         spliceInsert.Add(flagsByte);
 

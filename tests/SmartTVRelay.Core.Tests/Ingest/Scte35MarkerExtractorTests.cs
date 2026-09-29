@@ -126,6 +126,82 @@ public class Scte35MarkerExtractorTests
         Assert.Empty(signals);
     }
 
+    [Fact]
+    public void Extract_ImmediateSplice_EmitsNoSignal()
+    {
+        // Arrange: splice_immediate_flag=1 means no splice_time() is present in the section at
+        // all. Extract() only parses recorded files, so wall-clock "now" at parse time has no
+        // relationship to broadcast time -- the extractor must emit nothing here rather than a
+        // fabricated, wrongly-timed signal (see docs/scte35-findings.md, "Known Limitations" #5).
+        var filePath = Path.Combine(Path.GetTempPath(), $"scte35-immediate-{Guid.NewGuid()}.ts");
+
+        try
+        {
+            WriteHandCraftedFixture(filePath, ptsTime: 0, immediate: true);
+
+            // Act
+            var signals = _extractor.Extract(filePath, CancellationToken.None);
+
+            // Assert
+            Assert.Empty(signals);
+        }
+        finally
+        {
+            File.Delete(filePath);
+        }
+    }
+
+    [Fact]
+    public void Extract_UnspecifiedSpliceTime_EmitsNoSignal()
+    {
+        // Arrange: time_specified_flag=0 means splice_time() carries no pts_time either --
+        // same rationale as the immediate-splice case above.
+        var filePath = Path.Combine(Path.GetTempPath(), $"scte35-unspecified-{Guid.NewGuid()}.ts");
+
+        try
+        {
+            WriteHandCraftedFixture(filePath, ptsTime: 0, timeSpecified: false);
+
+            // Act
+            var signals = _extractor.Extract(filePath, CancellationToken.None);
+
+            // Assert
+            Assert.Empty(signals);
+        }
+        finally
+        {
+            File.Delete(filePath);
+        }
+    }
+
+    [Fact]
+    public void Extract_WithPtsAdjustment_AppliesItToTheObservedTime()
+    {
+        // Arrange: pts_adjustment is a real, independently-encoded field (data[4..8] of the
+        // splice_info_section header) that must be added to pts_time -- effective time is
+        // (pts_time + pts_adjustment) mod 2^33, per ANSI/SCTE 35. pts_time=90000 (1.0s) with
+        // pts_adjustment=90000 (1.0s) should observe at 2.0s, not 1.0s.
+        const uint ptsTime = 90_000;
+        const uint ptsAdjustment = 90_000;
+        var filePath = Path.Combine(Path.GetTempPath(), $"scte35-adjustment-{Guid.NewGuid()}.ts");
+
+        try
+        {
+            WriteHandCraftedFixture(filePath, ptsTime, ptsAdjustment: ptsAdjustment);
+
+            // Act
+            var signals = _extractor.Extract(filePath, CancellationToken.None);
+
+            // Assert
+            var signal = Assert.Single(signals);
+            Assert.Equal(DateTimeOffset.UnixEpoch + TimeSpan.FromSeconds(2.0), signal.ObservedAt);
+        }
+        finally
+        {
+            File.Delete(filePath);
+        }
+    }
+
     /// <summary>
     /// Hand-builds a single-program MPEG-TS file (PAT -> PMT -> one SCTE-35 splice_insert
     /// CueOut section) independently of fixtures/synthetic/generate-scte35-fixture.cs, encoding
@@ -133,7 +209,7 @@ public class Scte35MarkerExtractorTests
     /// than reusing any shared helper, so this test cannot pass merely because it agrees with
     /// itself.
     /// </summary>
-    private static void WriteHandCraftedFixture(string filePath, uint ptsTime)
+    private static void WriteHandCraftedFixture(string filePath, uint ptsTime, uint ptsAdjustment = 0, bool immediate = false, bool timeSpecified = true)
     {
         const int patPid = 0x0000;
         const int pmtPid = 0x0200;
@@ -172,33 +248,67 @@ public class Scte35MarkerExtractorTests
         WriteSection(writer, pmtPid, pmt);
 
         // splice_insert(): splice_event_id=1, out_of_network_indicator=1 (CueOut),
-        // program_splice_flag=1, splice_immediate_flag=0, splice_time present.
-        byte ptsByte0 = (byte)(0x80 | 0x7E | ((ptsTime >> 32) & 0x01));
-        var spliceInsert = new byte[]
+        // program_splice_flag=1, splice_immediate_flag=<immediate>.
+        // Per ANSI/SCTE 35, splice_event_cancel_indicator is its own byte (bit7 + 7 reserved
+        // bits); out_of_network/program_splice/duration/immediate flags are the NEXT byte.
+        // splice_time() is present only when program_splice_flag=1 AND splice_immediate_flag=0;
+        // it is 1 byte when time_specified_flag=0 (flag + 7 reserved bits, no pts_time), or 5
+        // bytes when time_specified_flag=1 (flag + 6 reserved bits + 33-bit pts_time, no
+        // marker bits).
+        byte flagsByte = (byte)(0xC0 | (immediate ? 0x10 : 0x00)); // out_of_network=1, program_splice=1
+        var spliceInsert = new List<byte>
         {
-            0x00, 0x00, 0x00, 0x01,          // splice_event_id
-            0x60,                             // cancel=0, out_of_network=1, program_splice=1, immediate=0
-            ptsByte0,
-            (byte)((ptsTime >> 24) & 0xFF),
-            (byte)((ptsTime >> 16) & 0xFF),
-            (byte)((ptsTime >> 8) & 0xFF),
-            (byte)(ptsTime & 0xFF),
+            0x00, 0x00, 0x00, 0x01, // splice_event_id
+            0x00,                   // splice_event_cancel_indicator=0, reserved(7)
+            flagsByte,
         };
 
-        var spliceCommand = new byte[1 + spliceInsert.Length];
+        if (!immediate)
+        {
+            if (!timeSpecified)
+            {
+                spliceInsert.Add(0x00); // time_specified_flag=0, reserved(7)
+            }
+            else
+            {
+                byte ptsByte0 = (byte)(0x80 | 0x7E | ((ptsTime >> 32) & 0x01));
+                spliceInsert.Add(ptsByte0);
+                spliceInsert.Add((byte)((ptsTime >> 24) & 0xFF));
+                spliceInsert.Add((byte)((ptsTime >> 16) & 0xFF));
+                spliceInsert.Add((byte)((ptsTime >> 8) & 0xFF));
+                spliceInsert.Add((byte)(ptsTime & 0xFF));
+            }
+        }
+
+        var spliceCommand = new byte[1 + spliceInsert.Count];
         spliceCommand[0] = 0x05; // splice_command_type: splice_insert
-        Array.Copy(spliceInsert, 0, spliceCommand, 1, spliceInsert.Length);
+        spliceInsert.CopyTo(spliceCommand, 1);
+
+        // encrypted_packet(0) + encryption_algorithm(0) + pts_adjustment: same plain 33-bit
+        // layout as splice_time()'s pts_time (no marker bits), sharing byte0's low bit as MSB.
+        byte adjByte0 = (byte)((ptsAdjustment >> 32) & 0x01);
+        var ptsAdjustmentBytes = new byte[]
+        {
+            adjByte0,
+            (byte)((ptsAdjustment >> 24) & 0xFF),
+            (byte)((ptsAdjustment >> 16) & 0xFF),
+            (byte)((ptsAdjustment >> 8) & 0xFF),
+            (byte)(ptsAdjustment & 0xFF),
+        };
 
         int spliceCommandLength = spliceCommand.Length;
         var scte35Body = new List<byte>
         {
-            0x00,                             // protocol_version
-            0x00, 0x00, 0x00, 0x00, 0x00,      // encrypted_packet+algorithm+pts_adjustment (5 bytes, unused)
+            0x00, // protocol_version
+        };
+        scte35Body.AddRange(ptsAdjustmentBytes); // encrypted_packet+algorithm+pts_adjustment (5 bytes)
+        scte35Body.AddRange(new byte[]
+        {
             0x00,                              // cw_index
             0xFF,                              // tier high byte (reserved, all 1s)
             (byte)(0xF0 | ((spliceCommandLength >> 8) & 0x0F)), // tier low nibble + cmd_length high nibble
             (byte)(spliceCommandLength & 0xFF),                 // cmd_length low byte
-        };
+        });
         scte35Body.AddRange(spliceCommand);
         scte35Body.AddRange(new byte[] { 0x00, 0x00, 0x00, 0x00 }); // CRC_32 (unvalidated)
 
