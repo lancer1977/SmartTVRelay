@@ -9,6 +9,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
+[Collection("Subprocess")]
 public class FrameAudioSamplerTests
 {
     private static string GetFixturePath(string filename)
