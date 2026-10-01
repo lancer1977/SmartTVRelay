@@ -10,23 +10,7 @@
 
   <ItemGroup>
     <PackageReference Include="Observation.Core" Version="0.1.0-preview.2" />
-  </ItemGroup>
-
-  <PropertyGroup>
-    <!--
-      Transitional: PolyhydraGames.CaptionExtractor (github.com/lancer1977/caption-extractor) is not
-      published yet. GitHub Packages and NuGet.org publishing is set up but not yet triggered by a
-      release. Locally this defaults to that repo's canonical checkout via $(HOME), independent of
-      whether THIS repo is built from its own canonical checkout or a worktree (a relative path would
-      resolve differently in each case). CI sets CAPTION_EXTRACTOR_ROOT to wherever it checks that
-      private repo out alongside this one (see ci.yml). Switch to a PackageReference once a version
-      is published.
-    -->
-    <CaptionExtractorRoot Condition="'$(CAPTION_EXTRACTOR_ROOT)' != ''">$(CAPTION_EXTRACTOR_ROOT)</CaptionExtractorRoot>
-    <CaptionExtractorRoot Condition="'$(CaptionExtractorRoot)' == ''">$(HOME)/code/caption-extractor</CaptionExtractorRoot>
-  </PropertyGroup>
-
-  <ItemGroup>
-    <ProjectReference Include="$(CaptionExtractorRoot)/src/PolyhydraGames.CaptionExtractor/PolyhydraGames.CaptionExtractor.csproj" />
+    <!-- Restored from the PolyhydraBaGet feed (see nuget.config's packageSourceMapping). -->
+    <PackageReference Include="PolyhydraGames.CaptionExtractor" Version="0.1.0" />
   </ItemGroup>
 </Project>
