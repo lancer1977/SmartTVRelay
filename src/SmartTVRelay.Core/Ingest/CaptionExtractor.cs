@@ -4,23 +4,41 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
+using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using EmbeddedCaptionExtractor = PolyhydraGames.CaptionExtractor.CaptionExtractor;
 
 /// <summary>A single caption/subtitle cue, normalized to file-relative timestamps.</summary>
 public sealed record CaptionSample(string Text, DateTimeOffset StartTime, DateTimeOffset EndTime);
 
 /// <summary>
 /// Extracts captions/subtitles from a media file as normalized, timestamped text samples.
-/// Decodes the file's first subtitle stream (if any) to WebVTT via ffmpeg and parses the cues.
-/// A file with no subtitle stream at all is a normal, expected case -- not a tool failure -- and
-/// returns an empty list (confirmed empirically: ffmpeg exits non-zero with "Output file does
-/// not contain any stream" in that case, distinct from every other failure mode observed).
+///
+/// Tries two extraction paths, in order:
+/// 1. The file's standalone subtitle stream (if any), decoded to WebVTT via ffmpeg. A file with no
+///    subtitle stream at all is a normal, expected case -- not a tool failure -- and yields an empty
+///    list here rather than throwing (confirmed empirically: ffmpeg exits non-zero with "Output file
+///    does not contain any stream" in that case, distinct from every other failure mode observed).
+/// 2. If that yields nothing and the file looks like an MPEG-TS (its first byte is the 0x47 sync
+///    byte), CEA-608/708 captions embedded directly in the video elementary stream -- the form real
+///    ATSC broadcasts actually use, which ffmpeg's subtitle-stream mapping cannot see at all (see
+///    issue #72). Decoded via the standalone PolyhydraGames.CaptionExtractor library.
+///
 /// Metadata/text extraction only -- no commercial-language classification (see AGENTS.md).
 /// </summary>
 public sealed class CaptionExtractor
 {
     private const string NoSubtitleStreamMarker = "Output file does not contain any stream";
+    private const byte MpegTsSyncByte = 0x47;
+
+    /// <summary>
+    /// CEA-608/708 give one timestamp per completed caption (when it's shown), not a start+end
+    /// duration. A caption with no next caption on the same channel/window to bound it (the last one
+    /// in the stream) gets this fixed fallback duration instead.
+    /// </summary>
+    private static readonly TimeSpan DefaultEmbeddedCaptionDuration = TimeSpan.FromSeconds(4);
 
     private readonly string _ffmpegPath;
     private readonly TimeSpan _timeout;
@@ -37,17 +55,36 @@ public sealed class CaptionExtractor
     }
 
     /// <summary>
-    /// Extracts the file's first subtitle stream as a list of timestamped caption samples, in
-    /// file order. Returns an empty list if the file has no subtitle stream at all.
+    /// Extracts a media file's captions as a list of timestamped caption samples, in file order.
+    /// Tries the standalone subtitle stream first, then falls back to embedded CEA-608/708 captions
+    /// (see the class summary). Returns an empty list if neither path finds anything.
     /// </summary>
     /// <exception cref="InvalidOperationException">
     /// Thrown when ffmpeg fails for a reason other than "no subtitle stream present" -- a
-    /// genuine tool failure, not the normal missing-captions case.
+    /// genuine tool failure, not the normal missing-captions case. The embedded-caption fallback is
+    /// not attempted in this case, matching the standalone-subtitle path's existing behavior exactly.
     /// </exception>
     /// <exception cref="OperationCanceledException">
     /// Thrown when the operation times out or <paramref name="cancellationToken"/> is cancelled.
     /// </exception>
     public async Task<IReadOnlyList<CaptionSample>> ExtractAsync(string filePath, CancellationToken cancellationToken)
+    {
+        var standaloneSamples = await ExtractFromStandaloneSubtitleAsync(filePath, cancellationToken).ConfigureAwait(false);
+        if (standaloneSamples.Count > 0)
+        {
+            return standaloneSamples;
+        }
+
+        if (!await LooksLikeMpegTsAsync(filePath, cancellationToken).ConfigureAwait(false))
+        {
+            return standaloneSamples;
+        }
+
+        var embeddedSamples = await ExtractEmbeddedAsync(filePath, cancellationToken).ConfigureAwait(false);
+        return embeddedSamples.Count > 0 ? embeddedSamples : standaloneSamples;
+    }
+
+    private async Task<IReadOnlyList<CaptionSample>> ExtractFromStandaloneSubtitleAsync(string filePath, CancellationToken cancellationToken)
     {
         // Create a linked cancellation token source to enforce the timeout while respecting the
         // caller's token (same pattern as TransportStreamInspector.InspectAsync).
@@ -133,6 +170,44 @@ public sealed class CaptionExtractor
             throw;
         }
     }
+
+    private static async Task<bool> LooksLikeMpegTsAsync(string filePath, CancellationToken cancellationToken)
+    {
+        await using var stream = File.OpenRead(filePath);
+        var buffer = new byte[1];
+        var read = await stream.ReadAsync(buffer.AsMemory(0, 1), cancellationToken).ConfigureAwait(false);
+        return read == 1 && buffer[0] == MpegTsSyncByte;
+    }
+
+    private static async Task<IReadOnlyList<CaptionSample>> ExtractEmbeddedAsync(string filePath, CancellationToken cancellationToken)
+    {
+        var cues = await EmbeddedCaptionExtractor.ExtractAsync(filePath, cancellationToken).ConfigureAwait(false);
+        if (cues.Count == 0)
+        {
+            return Array.Empty<CaptionSample>();
+        }
+
+        var samples = new List<CaptionSample>();
+        foreach (var group in cues.Where(c => c.Pts.HasValue).GroupBy(c => c.Source))
+        {
+            var ordered = group.OrderBy(c => c.Pts!.Value).ToList();
+            for (var i = 0; i < ordered.Count; i++)
+            {
+                var start = PtsToDateTimeOffset(ordered[i].Pts!.Value);
+                var end = i + 1 < ordered.Count
+                    ? PtsToDateTimeOffset(ordered[i + 1].Pts!.Value)
+                    : start + DefaultEmbeddedCaptionDuration;
+                samples.Add(new CaptionSample(ordered[i].Text, start, end));
+            }
+        }
+
+        return samples.OrderBy(s => s.StartTime).ToList();
+    }
+
+    private const double CaptionPtsFrequencyHz = 90_000.0;
+
+    private static DateTimeOffset PtsToDateTimeOffset(long pts) =>
+        DateTimeOffset.UnixEpoch + TimeSpan.FromSeconds(pts / CaptionPtsFrequencyHz);
 
     private static IReadOnlyList<CaptionSample> ParseWebVtt(string webVttText)
     {

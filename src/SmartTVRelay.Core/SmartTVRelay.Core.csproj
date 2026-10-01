@@ -10,5 +10,7 @@
 
   <ItemGroup>
     <PackageReference Include="Observation.Core" Version="0.1.0-preview.2" />
+    <!-- Restored from the PolyhydraBaGet feed (see nuget.config's packageSourceMapping). -->
+    <PackageReference Include="PolyhydraGames.CaptionExtractor" Version="0.1.0" />
   </ItemGroup>
 </Project>

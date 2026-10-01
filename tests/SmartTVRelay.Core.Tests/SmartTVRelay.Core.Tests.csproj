@@ -21,5 +21,6 @@
     <None Include="../../fixtures/synthetic/*.ts" CopyToOutputDirectory="PreserveNewest" Link="synthetic/%(Filename)%(Extension)" />
     <None Include="../../fixtures/synthetic/*.mp4" CopyToOutputDirectory="PreserveNewest" Link="synthetic/%(Filename)%(Extension)" />
     <None Include="Fixtures/scripts/hanging-ffmpeg.sh" CopyToOutputDirectory="PreserveNewest" Link="hanging-ffmpeg.sh" />
+    <None Include="Fixtures/scripts/no-subtitle-ffmpeg.sh" CopyToOutputDirectory="PreserveNewest" Link="no-subtitle-ffmpeg.sh" />
   </ItemGroup>
 </Project>
