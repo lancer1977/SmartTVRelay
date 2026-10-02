@@ -10,11 +10,13 @@ builder.Services.AddSingleton<IFfmpegRunner, ProcessFfmpegRunner>();
 builder.Services.AddSingleton<ChannelPipelineManager>();
 builder.Services.AddSingleton<IChannelPipelineRegistry>(sp => sp.GetRequiredService<ChannelPipelineManager>());
 builder.Services.AddHostedService(sp => sp.GetRequiredService<ChannelPipelineManager>());
+builder.Services.AddChannelState();
 
 var app = builder.Build();
 
 app.UseDefaultFiles();
 app.UseStaticFiles();
+app.MapChannelState();
 
 app.MapGet("/api/channels", async (ITunerLineup lineup, CancellationToken ct) =>
 {
