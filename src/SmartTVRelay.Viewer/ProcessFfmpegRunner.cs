@@ -16,7 +16,11 @@ public sealed class ProcessFfmpegRunner(IOptions<ViewerOptions> options) : IFfmp
         };
         foreach (var a in new[]
         {
-            "-nostdin", "-loglevel", "warning", "-i", info.InputUrl,
+            "-nostdin", "-loglevel", "warning",
+            "-probesize", options.Value.ProbeSize,
+            "-analyzeduration", options.Value.AnalyzeDurationUs.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            "-fflags", "+genpts+discardcorrupt",
+            "-i", info.InputUrl,
             "-vf", "yadif", "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
             "-force_key_frames", "expr:gte(t,n_forced*4)",
             "-c:a", "aac", "-b:a", "128k", "-ac", "2",

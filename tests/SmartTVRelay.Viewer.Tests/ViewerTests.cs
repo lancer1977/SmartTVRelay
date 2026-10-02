@@ -16,6 +16,16 @@ public sealed class ViewerTests : IDisposable
     public void Dispose() { _c.Dispose(); _f.Dispose(); }
 
     [Fact]
+    public void Options_DefaultsBind()
+    {
+        var o = new ViewerOptions();
+        Assert.Equal(45, o.StartupTimeoutSeconds);
+        Assert.Equal("5M", o.ProbeSize);
+        Assert.Equal(2_000_000, o.AnalyzeDurationUs);
+        Assert.Equal(1, _f.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<ViewerOptions>>().Value.StartupTimeoutSeconds);
+    }
+
+    [Fact]
     public async Task Channels_MapsLineupToCamelCaseContract()
     {
         var res = await _c.GetAsync("/api/channels");
