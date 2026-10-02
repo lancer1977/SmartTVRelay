@@ -12,6 +12,7 @@
 
   <ItemGroup>
     <ProjectReference Include="../../src/SmartTVRelay.Core/SmartTVRelay.Core.csproj" />
+    <ProjectReference Include="../../src/SmartTVRelay.Evaluation/SmartTVRelay.Evaluation.csproj" />
   </ItemGroup>
 
   <ItemGroup>

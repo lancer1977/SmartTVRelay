@@ -10,6 +10,14 @@ using SmartTVRelay.Evaluation;
 try
 {
     var options = EvaluationCliOptions.Parse(args);
+    if (options.Mode == "live-smoke")
+    {
+        using var client = new HttpClient();
+        var result = await new LiveSmokeRunner().RunAsync(options, client);
+        Console.WriteLine(result.Summary);
+        return result.ExitCode;
+    }
+
     Directory.CreateDirectory(options.OutputDirectory);
 
     var thresholds = new EvaluationThresholds(options.MinCommercialPrecision, options.MinCommercialRecall, options.MaxFalseReplacementCount);
