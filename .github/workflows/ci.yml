@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - dev
+      - main
+
+jobs:
+  build:
+    # Matches AgenticGameHarness's runner strategy: self-hosted by default,
+    # hosted only when explicitly opted in via the HOSTED_CI_ENABLED repo
+    # variable. No self-hosted runner is registered for this repo yet, so
+    # HOSTED_CI_ENABLED=true is set for now; flip it off once one exists.
+    runs-on: ${{ fromJSON(vars.HOSTED_CI_ENABLED == 'true' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","pr-validation","smarttvrelay"]') }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Install ffmpeg
+        # TransportStreamInspector (#31) and FrameAudioSampler (#34) shell out to
+        # real ffprobe/ffmpeg binaries; the hosted ubuntu-24.04 runner doesn't have
+        # them preinstalled, so tests exercising real fixtures fail with
+        # Win32Exception "No such file or directory" without this step.
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Restore
+        run: dotnet restore SmartTVRelay.slnx
+      - name: Build
+        run: dotnet build SmartTVRelay.slnx -c Release
+      - name: Test
+        run: dotnet test SmartTVRelay.slnx -c Release
+      - name: Evaluate synthetic broadcast corpus
+        # Fixed synthetic fixtures only -- no live hardware/network dependency (#27). Exit code 1
+        # means a metric regression (ran fine, didn't meet the bar); exit code 2 means the
+        # evaluation itself couldn't run (a tooling bug) -- both fail the job, but the distinction
+        # is preserved in the step's own output rather than collapsed into one generic failure.
+        run: dotnet run --project src/SmartTVRelay.Evaluation -c Release -- --output artifacts/evaluation
+      - name: Publish evaluation report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evaluation-report
+          path: artifacts/evaluation
+          if-no-files-found: warn

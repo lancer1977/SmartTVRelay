@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>SmartTVRelay.Core</RootNamespace>
+    <PackageId>SmartTVRelay.Core</PackageId>
+    <Description>SmartTVRelay perception and relay harness core.</Description>
+    <RepositoryUrl>https://github.com/lancer1977/SmartTVRelay</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/lancer1977/SmartTVRelay</PackageProjectUrl>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Observation.Core" Version="0.1.0-preview.2" />
+    <!-- Restored from the PolyhydraBaGet feed (see nuget.config's packageSourceMapping). -->
+    <PackageReference Include="PolyhydraGames.CaptionExtractor" Version="0.1.0" />
+  </ItemGroup>
+</Project>
