@@ -1,6 +1,11 @@
 using SmartTVRelay.Viewer;
 
-var builder = WebApplication.CreateBuilder(args);
+// Resolve content/web root next to the assembly so wwwroot is served regardless of the process cwd.
+var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+{
+    Args = args,
+    ContentRootPath = AppContext.BaseDirectory,
+});
 
 builder.Services.Configure<ViewerOptions>(builder.Configuration.GetSection("Viewer"));
 builder.Services.Configure<TunerOptions>(builder.Configuration.GetSection("Tuner"));

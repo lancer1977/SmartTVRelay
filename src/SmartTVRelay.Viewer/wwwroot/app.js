@@ -102,9 +102,8 @@
     video.onwaiting = () => { if (my === session && !tuneTimer) { showOverlay('Buffering…'); armStall(my); } };
     video.onstalled = () => { if (my === session && !tuneTimer) armStall(my); };
     video.onerror = () => { if (my === session) showError('Playback error. The stream may have ended.'); };
-    if (video.canPlayType('application/vnd.apple.mpegurl')) {
-      video.src = url;
-    } else if (window.Hls && Hls.isSupported()) {
+    // Prefer hls.js (MSE) whenever available: Chrome now answers "maybe" to canPlayType but its native HLS is unreliable.
+    if (window.Hls && Hls.isSupported()) {
       hls = new Hls({ lowLatencyMode: false });
       hls.on(Hls.Events.ERROR, (_e, d) => {
         if (my !== session || !d.fatal) return;
@@ -112,6 +111,8 @@
         showError(ERR[code] || 'Playback failed (' + d.details + ').');
       });
       hls.loadSource(url); hls.attachMedia(video);
+    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      video.src = url; // native HLS: Safari / iPhone (no MSE, so Hls.isSupported() is false)
     } else { showError('This browser cannot play HLS.'); return; }
     armStall(my);
     const p = video.play(); if (p && p.catch) p.catch(() => showOverlay('Tap the video to start playback.'));

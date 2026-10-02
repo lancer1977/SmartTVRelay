@@ -76,4 +76,51 @@ public sealed class WebPlayerTests : IDisposable
         var hls = await _c.GetAsync("/hls/9.9/index.m3u8");
         Assert.Equal(HttpStatusCode.NotFound, hls.StatusCode);
     }
+
+    [Fact]
+    public async Task AppJs_PrefersHlsJsBeforeNativeCanPlayType()
+    {
+        var js = await (await _c.GetAsync("/app.js")).Content.ReadAsStringAsync();
+        var start = js.IndexOf("function startPlayback", StringComparison.Ordinal);
+        Assert.True(start >= 0);
+        var body = js[start..];
+        var hlsJs = body.IndexOf("window.Hls && Hls.isSupported()", StringComparison.Ordinal);
+        var native = body.IndexOf("canPlayType('application/vnd.apple.mpegurl')", StringComparison.Ordinal);
+        Assert.True(hlsJs >= 0 && native >= 0);
+        Assert.True(hlsJs < native, "hls.js branch must be checked before native canPlayType");
+    }
+
+    [Fact]
+    public async Task Root_IsServedWhenProcessStartsFromAnotherWorkingDirectory()
+    {
+        var dll = Path.Combine(AppContext.BaseDirectory, "SmartTVRelay.Viewer.dll");
+        Assert.True(File.Exists(dll), dll);
+        var port = System.Net.Sockets.TcpListener.Create(0);
+        port.Start(); var p = ((IPEndPoint)port.LocalEndpoint).Port; port.Stop();
+        var cwd = Directory.CreateTempSubdirectory("viewer-cwd-").FullName;
+        var psi = new System.Diagnostics.ProcessStartInfo("dotnet", $"\"{dll}\"")
+        {
+            WorkingDirectory = cwd, RedirectStandardOutput = true, RedirectStandardError = true,
+        };
+        psi.Environment["ASPNETCORE_URLS"] = $"http://127.0.0.1:{p}";
+        psi.Environment["ASPNETCORE_ENVIRONMENT"] = "Production";
+        using var proc = System.Diagnostics.Process.Start(psi)!;
+        try
+        {
+            using var http = new HttpClient();
+            HttpStatusCode? code = null;
+            for (var i = 0; i < 100 && code is null; i++)
+            {
+                if (proc.HasExited) break;
+                try { code = (await http.GetAsync($"http://127.0.0.1:{p}/")).StatusCode; }
+                catch (HttpRequestException) { await Task.Delay(100); }
+            }
+            Assert.Equal(HttpStatusCode.OK, code);
+        }
+        finally
+        {
+            if (!proc.HasExited) proc.Kill(true);
+            try { Directory.Delete(cwd, true); } catch { }
+        }
+    }
 }

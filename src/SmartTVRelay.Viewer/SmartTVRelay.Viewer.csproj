@@ -5,6 +5,11 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- Copy wwwroot beside the dll so `dotnet SmartTVRelay.Viewer.dll` works from any cwd (not only publish). -->
+    <Content Update="wwwroot/**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="../SmartTVRelay.Core/SmartTVRelay.Core.csproj" />
   </ItemGroup>
 </Project>
