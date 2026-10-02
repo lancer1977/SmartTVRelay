@@ -27,3 +27,13 @@ ffmpeg processes are killed and work dirs deleted on host shutdown.
 
 ## Extension points
 `IFfmpegRunner` (process launch), `ITunerLineup`, and `IChannelPipelineRegistry` (`RunningChannels`, `GetWorkDirectory`).
+
+## Web player
+Static PWA served from `src/SmartTVRelay.Viewer/wwwroot` at `/` (no build step; hls.js 1.5.17 from cdnjs with SRI).
+Channel list from `/api/channels`, tap to play `/hls/{n}/index.m3u8` (native HLS on Safari/iOS, hls.js elsewhere).
+The first request can take ~25s while the tuner locks, so the player shows "Tuning… Ns". Errors are mapped:
+503 tuners busy, 404 offline, 502 tuner unreachable, 504 not ready, plus a stalled-stream state with Retry.
+A state badge (Program / Commercial / Unknown, text plus colour) comes from SSE `/api/channels/{n}/events`;
+it is hidden if that endpoint is absent and reconnects back off exponentially (2s to 60s). Stop closes the player and
+drops the HLS request so the idle reaper frees the tuner. The service worker caches the app shell only and never `/api` or `/hls`.
+`UseDefaultFiles`/`UseStaticFiles` run before endpoint mapping; they only match files that exist, so `/api` and `/hls` routes are unaffected.

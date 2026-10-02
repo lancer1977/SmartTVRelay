@@ -13,6 +13,9 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<ChannelPipelineMan
 
 var app = builder.Build();
 
+app.UseDefaultFiles();
+app.UseStaticFiles();
+
 app.MapGet("/api/channels", async (ITunerLineup lineup, CancellationToken ct) =>
 {
     try { return Results.Ok(await lineup.GetChannelsAsync(ct)); }
