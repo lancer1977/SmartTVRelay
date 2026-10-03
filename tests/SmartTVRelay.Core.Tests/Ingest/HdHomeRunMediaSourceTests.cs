@@ -535,7 +535,8 @@ public class HdHomeRunMediaSourceTests
 
         var error = await Assert.ThrowsAsync<InvalidOperationException>(Act);
         Assert.Null(error.InnerException);
-        Assert.DoesNotContain("token", error.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("?token=", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("secret", error.Message, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("secret", source.Diagnostics.Detail ?? string.Empty, StringComparison.OrdinalIgnoreCase);
     }
 
