@@ -22,6 +22,9 @@ public sealed class HdHomeRunMediaSource : IBroadcastMediaSource
     private TimeSpan? lastMediaTimestamp;
     private int probeErrorCount;
     private int decodeErrorCount;
+    private int reconnectAttempts;
+
+    private const int MaxReconnectAttempts = 3;
 
     public HdHomeRunMediaSource(HttpClient httpClient, string sourceId, string baseUrl, string channelGuideNumber)
     {
@@ -43,10 +46,8 @@ public sealed class HdHomeRunMediaSource : IBroadcastMediaSource
 
     /// <summary>
     /// Structured ingest diagnostics (#35), reflecting the current/most recent <see cref="ReadAsync"/>
-    /// attempt. <c>ReconnectAttempts</c> is always 0: this class does not retry on failure today (a
-    /// connectivity or read failure surfaces once via <c>ProbeErrorCount</c>/<c>DecodeErrorCount</c>
-    /// and the read ends) -- see <see cref="IngestDiagnostics.ReconnectAttempts"/> for why the field
-    /// still exists.
+    /// attempt. <c>ReconnectAttempts</c> counts the bounded reconnects made after a stream open,
+    /// read, or end-of-stream failure.
     /// </summary>
     public IngestDiagnostics Diagnostics => new(
         SourceId,
@@ -57,7 +58,7 @@ public sealed class HdHomeRunMediaSource : IBroadcastMediaSource
         lastMediaTimestamp,
         probeErrorCount,
         decodeErrorCount,
-        ReconnectAttempts: 0);
+        ReconnectAttempts: reconnectAttempts);
 
     public async IAsyncEnumerable<MediaChunk> ReadAsync([EnumeratorCancellation] CancellationToken cancellationToken)
     {
@@ -72,7 +73,7 @@ public sealed class HdHomeRunMediaSource : IBroadcastMediaSource
 
             if (!lineupResponse.IsSuccessStatusCode)
             {
-                var detail = $"[{SourceId}] Failed to reach HDHomeRun lineup at {lineupUrl}: HTTP {(int)lineupResponse.StatusCode} {lineupResponse.ReasonPhrase}";
+                var detail = $"[{SourceId}] Failed to reach HDHomeRun lineup at {DescribeEndpoint(lineupUrl)}: HTTP {(int)lineupResponse.StatusCode} {lineupResponse.ReasonPhrase}";
                 probeErrorCount++;
                 Status = new SourceStatus(SourceHealth.Unavailable, detail);
                 throw new InvalidOperationException(detail);
@@ -84,7 +85,7 @@ public sealed class HdHomeRunMediaSource : IBroadcastMediaSource
             selectedChannel = lineup.FirstOrDefault(c => c.GuideNumber == channelGuideNumber);
             if (selectedChannel is null)
             {
-                var detail = $"[{SourceId}] Channel '{channelGuideNumber}' not found in lineup at {baseUrl}";
+                var detail = $"[{SourceId}] Channel '{channelGuideNumber}' not found in lineup at {DescribeEndpoint(baseUrl)}";
                 probeErrorCount++;
                 Status = new SourceStatus(SourceHealth.Unavailable, detail);
                 throw new InvalidOperationException(detail);
@@ -100,83 +101,151 @@ public sealed class HdHomeRunMediaSource : IBroadcastMediaSource
         }
         catch (Exception ex)
         {
-            var detail = $"[{SourceId}] Failed to reach HDHomeRun lineup at {baseUrl}/lineup.json: {ex.Message}";
+            var safeError = ex.Message.Contains("http", StringComparison.OrdinalIgnoreCase) || ex.Message.Contains('?')
+                ? ex.GetType().Name
+                : ex.Message;
+            var detail = $"[{SourceId}] Failed to reach HDHomeRun lineup at {DescribeEndpoint(baseUrl)}: {safeError}";
             probeErrorCount++;
             Status = new SourceStatus(SourceHealth.Unavailable, detail);
             throw new InvalidOperationException(detail, ex);
         }
 
-        // Open the stream
-        Status = new SourceStatus(SourceHealth.Healthy);
-
-        try
+        // Reconnect a dropped tuner stream a bounded number of times. The lineup is resolved once;
+        // reconnecting the selected stream does not require UDP discovery or a new channel lookup.
+        while (true)
         {
-            var streamResponse = await httpClient.GetAsync(
-                selectedChannel.URL,
-                HttpCompletionOption.ResponseHeadersRead,
-                cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            Exception? failure = null;
+            var streamEnded = false;
+            var reconnectOnEnd = true;
+            Stream? stream = null;
 
-            if (!streamResponse.IsSuccessStatusCode)
+            try
             {
-                var detail = $"[{SourceId}] Failed to open stream at {selectedChannel.URL}: HTTP {(int)streamResponse.StatusCode}";
-                probeErrorCount++;
-                Status = new SourceStatus(SourceHealth.Unavailable, detail);
-                throw new InvalidOperationException(detail);
-            }
-
-            currentResponse = streamResponse;
-            var stream = await streamResponse.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-            currentStream = stream;
-
-            var stopwatch = Stopwatch.StartNew();
-            const int ChunkSize = 65536;
-            var buffer = new byte[ChunkSize];
-
-            while (true)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                int bytesRead;
+                HttpResponseMessage? streamResponse = null;
                 try
                 {
-                    bytesRead = await stream.ReadAsync(buffer, 0, ChunkSize, cancellationToken).ConfigureAwait(false);
+                    streamResponse = await httpClient.GetAsync(
+                        selectedChannel.URL,
+                        HttpCompletionOption.ResponseHeadersRead,
+                        cancellationToken).ConfigureAwait(false);
+                    currentResponse = streamResponse;
+
+                    if (!streamResponse.IsSuccessStatusCode)
+                    {
+                        probeErrorCount++;
+                        failure = new InvalidOperationException(
+                            $"[{SourceId}] Failed to open HDHomeRun stream at {DescribeEndpoint(selectedChannel.URL)}: HTTP {(int)streamResponse.StatusCode}");
+                    }
+                    else
+                    {
+                        reconnectOnEnd = !streamResponse.Content.Headers.ContentLength.HasValue;
+                        stream = currentStream = await streamResponse.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+                    }
                 }
-                catch (Exception ex) when (!(ex is OperationCanceledException))
+                catch (OperationCanceledException)
                 {
-                    var detail = $"[{SourceId}] Stream read failed from {selectedChannel.URL}: {ex.Message}";
-                    decodeErrorCount++;
-                    Status = new SourceStatus(SourceHealth.Unavailable, detail);
                     throw;
                 }
-
-                if (bytesRead == 0)
+                catch (Exception ex)
                 {
-                    // End of stream
-                    break;
+                    failure = ex;
                 }
 
-                // Copy out of the shared read buffer -- buffer is reused on the next iteration,
-                // so a MediaChunk wrapping it directly (instead of copying) would silently alias
-                // whatever the next read overwrites it with, corrupting every previously-yielded
-                // chunk's Data as soon as the consumer stops holding the enumerator at that item.
-                var chunk = new MediaChunk(buffer[..bytesRead], stopwatch.Elapsed);
+                if (failure is null && stream is not null)
+                {
+                    Status = new SourceStatus(SourceHealth.Healthy);
+                    var stopwatch = Stopwatch.StartNew();
+                    const int ChunkSize = 65536;
+                    var buffer = new byte[ChunkSize];
 
-                // Updated before yielding, matching RecordedFileMediaSource's convention, so a
-                // caller inspecting Diagnostics while consuming this chunk sees it already counted.
-                bytesProcessed += bytesRead;
-                chunksProcessed++;
-                lastMediaTimestamp = chunk.SourceTime;
+                    while (true)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        int bytesRead;
+                        Exception? readFailure = null;
+                        try
+                        {
+                            bytesRead = await stream.ReadAsync(buffer, 0, ChunkSize, cancellationToken).ConfigureAwait(false);
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        {
+                            bytesRead = 0;
+                            readFailure = ex;
+                        }
 
-                yield return chunk;
+                        if (readFailure is not null)
+                        {
+                            decodeErrorCount++;
+                            failure = readFailure;
+                            break;
+                        }
+
+                        if (bytesRead == 0)
+                        {
+                            streamEnded = true;
+                            break;
+                        }
+
+                        var chunk = new MediaChunk(buffer[..bytesRead], stopwatch.Elapsed);
+                        bytesProcessed += bytesRead;
+                        chunksProcessed++;
+                        lastMediaTimestamp = chunk.SourceTime;
+                        yield return chunk;
+                    }
+                }
             }
+            finally
+            {
+                currentStream?.Dispose();
+                currentResponse?.Dispose();
+                currentStream = null;
+                currentResponse = null;
+            }
+
+            if (failure is null && !streamEnded)
+            {
+                yield break;
+            }
+
+            if (streamEnded && !reconnectOnEnd)
+            {
+                yield break;
+            }
+
+            if (reconnectAttempts >= MaxReconnectAttempts)
+            {
+                var reason = streamEnded ? "stream ended" : "stream failure";
+                Status = new SourceStatus(
+                    SourceHealth.Unavailable,
+                    $"[{SourceId}] HDHomeRun {reason} after {reconnectAttempts} reconnect attempts; terminal error {failure?.GetType().Name ?? "none"}");
+
+                // Preserve the existing natural-completion behavior for an exhausted clean EOF;
+                // transport/read failures remain observable to callers after retries are exhausted.
+                if (streamEnded)
+                {
+                    yield break;
+                }
+
+                throw failure ?? new InvalidOperationException(Status.Detail);
+            }
+
+            reconnectAttempts++;
+            Status = new SourceStatus(
+                SourceHealth.Unknown,
+                $"[{SourceId}] Reconnecting HDHomeRun stream (attempt {reconnectAttempts}/{MaxReconnectAttempts})");
         }
-        finally
+    }
+
+    private static string DescribeEndpoint(string endpoint)
+    {
+        if (!Uri.TryCreate(endpoint, UriKind.Absolute, out var uri))
         {
-            currentStream?.Dispose();
-            currentResponse?.Dispose();
-            currentStream = null;
-            currentResponse = null;
+            return "[redacted endpoint]";
         }
+
+        var port = uri.IsDefaultPort ? string.Empty : $":{uri.Port}";
+        return $"{uri.Scheme}://{uri.Host}{port}";
     }
 
     public async ValueTask DisposeAsync()
