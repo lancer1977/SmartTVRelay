@@ -814,6 +814,35 @@ public class HdHomeRunMediaSourceTests
         Assert.Equal(0, source.Diagnostics.ReconnectAttempts);
     }
 
+    [Fact]
+    public async Task ReadAsync_CancellationDuringRetryDelayDoesNotCountUnstartedReconnect()
+    {
+        using var cts = new CancellationTokenSource();
+        var streamCalls = 0;
+        var handler = new FakeHttpMessageHandler(req =>
+        {
+            if (req.RequestUri?.AbsolutePath.EndsWith("lineup.json", StringComparison.Ordinal) == true)
+                return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                {
+                    Content = new StringContent("[{\"GuideNumber\":\"2.1\",\"URL\":\"http://192.168.0.66:5004/auto/v2.1\"}]"),
+                };
+
+            streamCalls++;
+            cts.CancelAfter(TimeSpan.FromMilliseconds(10));
+            return new HttpResponseMessage(System.Net.HttpStatusCode.ServiceUnavailable);
+        });
+        using var client = new HttpClient(handler);
+        var source = new HdHomeRunMediaSource(client, "source-1", "http://192.168.0.66", "2.1");
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+        {
+            await foreach (var _ in source.ReadAsync(cts.Token)) { }
+        });
+
+        Assert.Equal(1, streamCalls);
+        Assert.Equal(0, source.Diagnostics.ReconnectAttempts);
+    }
+
     /// <summary>HttpContent whose stream throws on the first read, after headers/connection succeed --
     /// simulating a decode-time failure distinct from a probe/connect-time failure.</summary>
     private sealed class ThrowingContent : HttpContent

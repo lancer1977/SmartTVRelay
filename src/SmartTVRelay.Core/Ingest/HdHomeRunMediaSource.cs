@@ -240,9 +240,10 @@ public sealed class HdHomeRunMediaSource : IBroadcastMediaSource
                 throw new InvalidOperationException(Status.Detail);
             }
 
+            await Task.Delay(ReconnectDelay, cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
             reconnectAttemptsThisRead++;
             reconnectAttempts++;
-            await Task.Delay(ReconnectDelay, cancellationToken).ConfigureAwait(false);
             Status = new SourceStatus(
                 SourceHealth.Unknown,
                 $"[{SourceId}] Reconnecting HDHomeRun stream (attempt {reconnectAttemptsThisRead}/{MaxReconnectAttempts})");
