@@ -464,6 +464,39 @@ public class RecordedFileMediaSourceTests
     }
 
     [Fact]
+    public async Task Diagnostics_CancelledBeforeAvailabilityInspection_LeavesAvailabilityUnknown()
+    {
+        var tempFile = Path.GetTempFileName();
+        RecordedFileMediaSource? source = null;
+        try
+        {
+            await File.WriteAllBytesAsync(tempFile, Enumerable.Repeat((byte)0x47, 188).ToArray());
+            source = new RecordedFileMediaSource("inspection-cancel-source", tempFile, chunkSizeBytes: 188);
+            using var cancellation = new CancellationTokenSource();
+
+            await foreach (var _ in source.ReadAsync(cancellation.Token))
+            {
+                // Cancel after the complete chunk has been yielded, immediately before the
+                // natural EOF path starts availability inspection.
+                cancellation.Cancel();
+            }
+
+            Assert.Null(source.Diagnostics.CaptionsAvailable);
+            Assert.Null(source.Diagnostics.MarkersAvailable);
+        }
+        catch (OperationCanceledException)
+        {
+            Assert.NotNull(source);
+            Assert.Null(source.Diagnostics.CaptionsAvailable);
+            Assert.Null(source.Diagnostics.MarkersAvailable);
+        }
+        finally
+        {
+            File.Delete(tempFile);
+        }
+    }
+
+    [Fact]
     public async Task Diagnostics_AfterFullRead_ReflectsBytesChunksAndLastTimestamp()
     {
         // Arrange: 3 chunks of 1024 bytes each, default 100ms chunk interval.

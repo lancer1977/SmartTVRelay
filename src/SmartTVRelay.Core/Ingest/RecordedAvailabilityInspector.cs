@@ -7,7 +7,7 @@ internal static class RecordedAvailabilityInspector
         string filePath,
         CancellationToken cancellationToken)
     {
-        if (!IsCompleteMediaFile(filePath))
+        if (!IsCompleteMediaFile(filePath, cancellationToken))
         {
             return (null, null);
         }
@@ -45,8 +45,9 @@ internal static class RecordedAvailabilityInspector
         return (captions, markers);
     }
 
-    private static bool IsCompleteMediaFile(string filePath)
+    private static bool IsCompleteMediaFile(string filePath, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         try
         {
             var length = new FileInfo(filePath).Length;
@@ -81,6 +82,7 @@ internal static class RecordedAvailabilityInspector
             var packet = new byte[packetSize];
             for (long offset = 0; offset < length; offset += packetSize)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 if (stream.Read(packet, 0, packet.Length) != packet.Length || packet[0] != 0x47)
                 {
                     return false;
