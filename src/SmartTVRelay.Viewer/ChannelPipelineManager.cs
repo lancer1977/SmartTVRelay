@@ -77,6 +77,10 @@ public sealed partial class ChannelPipelineManager : IChannelPipelineRegistry, I
 
             var dir = Path.Combine(_viewer.WorkDir, $"ch-{guideNumber}-{Guid.NewGuid():N}");
             Directory.CreateDirectory(dir);
+            // Raw tuner captures stay local to the service account. The HLS routes serve
+            // only generated segments, and other local users cannot read the work dir.
+            if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
+                File.SetUnixFileMode(dir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
             var playlist = Path.Combine(dir, "index.m3u8");
             var input = $"http://{new Uri(_tuner.BaseUrl).Host}:{_tuner.StreamPort}/auto/v{guideNumber}";
             IFfmpegProcess process;
