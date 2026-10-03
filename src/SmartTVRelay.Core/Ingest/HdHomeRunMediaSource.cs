@@ -23,6 +23,7 @@ public sealed class HdHomeRunMediaSource : IBroadcastMediaSource
     private int probeErrorCount;
     private int decodeErrorCount;
     private int reconnectAttempts;
+    private LiveAvailabilityWindow? availabilityWindow;
 
     private const int MaxReconnectAttempts = 3;
     private static readonly TimeSpan ReconnectDelay = TimeSpan.FromMilliseconds(50);
@@ -59,11 +60,14 @@ public sealed class HdHomeRunMediaSource : IBroadcastMediaSource
         lastMediaTimestamp,
         probeErrorCount,
         decodeErrorCount,
-        ReconnectAttempts: reconnectAttempts);
+        ReconnectAttempts: reconnectAttempts,
+        CaptionsAvailable: availabilityWindow?.Snapshot().CaptionsAvailable,
+        MarkersAvailable: availabilityWindow?.Snapshot().MarkersAvailable);
 
     public async IAsyncEnumerable<MediaChunk> ReadAsync([EnumeratorCancellation] CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        availabilityWindow = new LiveAvailabilityWindow(cancellationToken);
 
         // Fetch and parse lineup.json
         LineupChannel? selectedChannel;
@@ -194,6 +198,7 @@ public sealed class HdHomeRunMediaSource : IBroadcastMediaSource
                         bytesProcessed += bytesRead;
                         chunksProcessed++;
                         lastMediaTimestamp = chunk.SourceTime;
+                        availabilityWindow.Add(chunk.Data);
                         yield return chunk;
                     }
                 }
@@ -213,6 +218,7 @@ public sealed class HdHomeRunMediaSource : IBroadcastMediaSource
 
             if (streamEnded && !reconnectOnEnd)
             {
+                await availabilityWindow.CompleteAsync().ConfigureAwait(false);
                 yield break;
             }
 
@@ -227,6 +233,7 @@ public sealed class HdHomeRunMediaSource : IBroadcastMediaSource
                 // transport/read failures remain observable to callers after retries are exhausted.
                 if (streamEnded)
                 {
+                    await availabilityWindow.CompleteAsync().ConfigureAwait(false);
                     yield break;
                 }
 

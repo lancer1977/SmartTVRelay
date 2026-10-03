@@ -28,14 +28,9 @@ namespace SmartTVRelay.Core.Ingest;
 /// is added elsewhere -- adding that logic itself is out of scope for #35 ("Agent boundary:
 /// Diagnostics only").</param>
 /// <param name="CaptionsAvailable">Whether captions were found available on this source, or
-/// <see langword="null"/> if not evaluated. Always <see langword="null"/> today: determining this
-/// requires running <see cref="CaptionExtractor"/> against a whole file, a substantially heavier
-/// operation than this per-chunk diagnostics snapshot, and a different architectural layer (this
-/// class only knows about bytes, not caption semantics). Left as a documented gap rather than
-/// wired up speculatively; see #35's follow-up discussion for when a real consumer needs it.</param>
+/// <see langword="null"/> if inspection has not completed or could not determine the answer.</param>
 /// <param name="MarkersAvailable">Whether SCTE-35 markers were found available on this source, or
-/// <see langword="null"/> if not evaluated. Same rationale as <see cref="CaptionsAvailable"/>,
-/// but for <see cref="Scte35MarkerExtractor"/>.</param>
+/// <see langword="null"/> if inspection has not completed or could not determine the answer.</param>
 public sealed record IngestDiagnostics(
     string SourceId,
     SourceHealth Health,
