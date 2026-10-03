@@ -4,42 +4,72 @@ namespace SmartTVRelay.Core.Ingest;
 /// Inspects one bounded, complete MPEG-TS window from a live source. The inspection runs away
 /// from the stream read loop so a slow caption decoder cannot stall delivery of media chunks.
 /// </summary>
-internal sealed class LiveAvailabilityWindow
+internal sealed class LiveAvailabilityWindow : IDisposable
 {
     private const int PacketSize = 188;
     private const int MaxBytes = (2 * 1024 * 1024 / PacketSize) * PacketSize;
-    private readonly MemoryStream capture = new(MaxBytes);
-    private readonly CancellationToken cancellationToken;
+    private readonly object gate = new();
+    private MemoryStream? capture = new(MaxBytes);
+    private readonly CancellationTokenSource inspectionCancellation;
+    private readonly CancellationToken inspectionToken;
     private Task<(bool? CaptionsAvailable, bool? MarkersAvailable)>? inspection;
+    private bool disposed;
 
-    public LiveAvailabilityWindow(CancellationToken cancellationToken) => this.cancellationToken = cancellationToken;
+    public LiveAvailabilityWindow(CancellationToken cancellationToken)
+    {
+        inspectionCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        inspectionToken = inspectionCancellation.Token;
+    }
 
     public void Add(ReadOnlyMemory<byte> bytes)
     {
-        if (inspection is not null) return;
-        var remaining = MaxBytes - (int)capture.Length;
-        capture.Write(bytes.Span[..Math.Min(remaining, bytes.Length)]);
-        if (capture.Length == MaxBytes) StartInspection();
+        lock (gate)
+        {
+            if (capture is null || inspection is not null) return;
+            var remaining = MaxBytes - (int)capture.Length;
+            capture.Write(bytes.Span[..Math.Min(remaining, bytes.Length)]);
+            if (capture.Length == MaxBytes) StartInspection();
+        }
     }
 
     public (bool? CaptionsAvailable, bool? MarkersAvailable) Snapshot()
     {
-        if (inspection is not { IsCompletedSuccessfully: true }) return (null, null);
-        return inspection.Result;
+        Task<(bool? CaptionsAvailable, bool? MarkersAvailable)>? task;
+        lock (gate) task = inspection;
+        return task is { IsCompletedSuccessfully: true } ? task.Result : (null, null);
     }
 
     public async Task CompleteAsync()
     {
-        if (inspection is null) StartInspection();
-        if (inspection is not null) await inspection.ConfigureAwait(false);
+        Task<(bool? CaptionsAvailable, bool? MarkersAvailable)>? task;
+        lock (gate)
+        {
+            if (inspection is null) StartInspection();
+            task = inspection;
+        }
+        if (task is not null) await task.ConfigureAwait(false);
     }
 
     private void StartInspection()
     {
-        if (inspection is not null || capture.Length == 0) return;
+        if (inspection is not null || capture is null || capture.Length == 0) return;
         var bytes = capture.ToArray();
         capture.Dispose();
-        inspection = Task.Run(() => InspectAsync(bytes, cancellationToken));
+        capture = null;
+        inspection = Task.Run(() => InspectAsync(bytes, inspectionToken));
+    }
+
+    public void Dispose()
+    {
+        lock (gate)
+        {
+            if (disposed) return;
+            disposed = true;
+            capture?.Dispose();
+            capture = null;
+            inspectionCancellation.Cancel();
+            inspectionCancellation.Dispose();
+        }
     }
 
     private static async Task<(bool? CaptionsAvailable, bool? MarkersAvailable)> InspectAsync(

@@ -67,7 +67,8 @@ public sealed class HdHomeRunMediaSource : IBroadcastMediaSource
     public async IAsyncEnumerable<MediaChunk> ReadAsync([EnumeratorCancellation] CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        availabilityWindow = new LiveAvailabilityWindow(cancellationToken);
+        using var window = new LiveAvailabilityWindow(cancellationToken);
+        availabilityWindow = window;
 
         // Fetch and parse lineup.json
         LineupChannel? selectedChannel;
@@ -198,7 +199,7 @@ public sealed class HdHomeRunMediaSource : IBroadcastMediaSource
                         bytesProcessed += bytesRead;
                         chunksProcessed++;
                         lastMediaTimestamp = chunk.SourceTime;
-                        availabilityWindow.Add(chunk.Data);
+                        window.Add(chunk.Data);
                         yield return chunk;
                     }
                 }
@@ -218,7 +219,7 @@ public sealed class HdHomeRunMediaSource : IBroadcastMediaSource
 
             if (streamEnded && !reconnectOnEnd)
             {
-                await availabilityWindow.CompleteAsync().ConfigureAwait(false);
+                await window.CompleteAsync().ConfigureAwait(false);
                 yield break;
             }
 
@@ -233,7 +234,7 @@ public sealed class HdHomeRunMediaSource : IBroadcastMediaSource
                 // transport/read failures remain observable to callers after retries are exhausted.
                 if (streamEnded)
                 {
-                    await availabilityWindow.CompleteAsync().ConfigureAwait(false);
+                    await window.CompleteAsync().ConfigureAwait(false);
                     yield break;
                 }
 
@@ -267,6 +268,7 @@ public sealed class HdHomeRunMediaSource : IBroadcastMediaSource
         currentResponse?.Dispose();
         currentStream = null;
         currentResponse = null;
+        availabilityWindow?.Dispose();
     }
 
     /// <summary>Minimal JSON shape for deserializing HDHomeRun lineup.json responses.</summary>

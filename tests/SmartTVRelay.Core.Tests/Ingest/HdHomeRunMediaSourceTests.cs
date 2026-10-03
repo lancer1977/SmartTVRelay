@@ -5,6 +5,34 @@ using Xunit;
 
 public class HdHomeRunMediaSourceTests
 {
+    [Fact]
+    public async Task ReadAsync_EarlyEnumerationDisposalReleasesIncompleteAvailabilityCapture()
+    {
+        var packet = new byte[188];
+        packet[0] = 0x47;
+        var handler = new FakeHttpMessageHandler(req => new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+        {
+            Content = req.RequestUri!.AbsolutePath.EndsWith("lineup.json", StringComparison.Ordinal)
+                ? new StringContent("[{\"GuideNumber\":\"2.1\",\"URL\":\"http://192.168.0.66:5004/auto/v2.1\"}]")
+                : new ByteArrayContent(packet),
+        });
+        using var client = new HttpClient(handler);
+        var source = new HdHomeRunMediaSource(client, "source-availability", "http://192.168.0.66", "2.1");
+
+        await using (var enumerator = source.ReadAsync(CancellationToken.None).GetAsyncEnumerator())
+            Assert.True(await enumerator.MoveNextAsync());
+
+        var window = typeof(HdHomeRunMediaSource)
+            .GetField("availabilityWindow", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+            .GetValue(source)!;
+        var capture = window.GetType()
+            .GetField("capture", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+            .GetValue(window);
+        Assert.Null(capture);
+        Assert.Null(source.Diagnostics.CaptionsAvailable);
+        Assert.Null(source.Diagnostics.MarkersAvailable);
+    }
+
     [Theory]
     [InlineData("synthetic/scte35-sample.ts", true)]
     [InlineData("captures/sample-live-capture.ts", false)]
