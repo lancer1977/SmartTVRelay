@@ -521,6 +521,25 @@ public class HdHomeRunMediaSourceTests
     }
 
     [Fact]
+    public async Task ReadAsync_LineupTransportFailureDoesNotExposeEndpointSecret()
+    {
+        var handler = new FakeHttpMessageHandler(_ =>
+            throw new HttpRequestException("Failed at http://192.168.0.66/private?token=secret"));
+        var source = new HdHomeRunMediaSource(
+            new HttpClient(handler), "source-1", "http://192.168.0.66/private?token=secret", "2.1");
+
+        async Task Act()
+        {
+            await foreach (var _ in source.ReadAsync(CancellationToken.None)) { }
+        }
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(Act);
+        Assert.Null(error.InnerException);
+        Assert.DoesNotContain("token", error.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("secret", source.Diagnostics.Detail ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task Diagnostics_ChannelNotFound_IncrementsProbeErrorCount()
     {
         var lineupJson = @"[{""GuideNumber"":""2.1"",""URL"":""http://192.168.0.66:5004/auto/v2.1""}]";

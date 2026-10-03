@@ -108,7 +108,8 @@ public sealed class HdHomeRunMediaSource : IBroadcastMediaSource
             var detail = $"[{SourceId}] Failed to reach HDHomeRun lineup at {DescribeEndpoint(baseUrl)}: {safeError}";
             probeErrorCount++;
             Status = new SourceStatus(SourceHealth.Unavailable, detail);
-            throw new InvalidOperationException(detail, ex);
+            // The transport exception may contain the original URL and query string.
+            throw new InvalidOperationException(detail);
         }
 
         // Reconnect a dropped tuner stream a bounded number of times. The lineup is resolved once;
