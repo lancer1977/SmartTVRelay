@@ -5,6 +5,45 @@ using Xunit;
 
 public class HdHomeRunMediaSourceTests
 {
+    [Theory]
+    [InlineData("synthetic/scte35-sample.ts", true)]
+    [InlineData("captures/sample-live-capture.ts", false)]
+    public async Task Diagnostics_InspectsCompletedLiveTransportWindow(string fixture, bool markersPresent)
+    {
+        var bytes = File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, fixture));
+        var handler = new FakeHttpMessageHandler(req => new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+        {
+            Content = req.RequestUri!.AbsolutePath.EndsWith("lineup.json", StringComparison.Ordinal)
+                ? new StringContent("[{\"GuideNumber\":\"2.1\",\"URL\":\"http://192.168.0.66:5004/auto/v2.1\"}]")
+                : new ByteArrayContent(bytes),
+        });
+        using var client = new HttpClient(handler);
+        var source = new HdHomeRunMediaSource(client, "source-availability", "http://192.168.0.66", "2.1");
+        Assert.Null(source.Diagnostics.MarkersAvailable);
+
+        await foreach (var _ in source.ReadAsync(CancellationToken.None)) { }
+
+        Assert.Equal(markersPresent, source.Diagnostics.MarkersAvailable);
+    }
+
+    [Fact]
+    public async Task Diagnostics_IncompleteLiveTransportLeavesAvailabilityUnknown()
+    {
+        var handler = new FakeHttpMessageHandler(req => new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+        {
+            Content = req.RequestUri!.AbsolutePath.EndsWith("lineup.json", StringComparison.Ordinal)
+                ? new StringContent("[{\"GuideNumber\":\"2.1\",\"URL\":\"http://192.168.0.66:5004/auto/v2.1\"}]")
+                : new ByteArrayContent([0x47, 0x00, 0x01]),
+        });
+        using var client = new HttpClient(handler);
+        var source = new HdHomeRunMediaSource(client, "source-availability", "http://192.168.0.66", "2.1");
+
+        await foreach (var _ in source.ReadAsync(CancellationToken.None)) { }
+
+        Assert.Null(source.Diagnostics.CaptionsAvailable);
+        Assert.Null(source.Diagnostics.MarkersAvailable);
+    }
+
     private sealed class FakeHttpMessageHandler : HttpMessageHandler
     {
         private readonly Func<HttpRequestMessage, HttpResponseMessage> responder;
