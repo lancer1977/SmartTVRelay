@@ -6,6 +6,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Observation.Core;
 using SmartTVRelay.Core;
 using SmartTVRelay.Core.Fixtures;
+using SmartTVRelay.Core.Ingest;
 using SmartTVRelay.Viewer.State;
 
 namespace SmartTVRelay.Viewer.Tests;
@@ -245,6 +246,62 @@ public sealed class ChannelStateTests : IDisposable
         File.WriteAllBytes(Path.Combine(dir, "seg00000.ts"), [0x47, 0, 0, 0]);
         Assert.Empty(await source.GetObservationsAsync("2.1", dir, default));
         Assert.Empty(await source.GetObservationsAsync("2.1", Path.Combine(dir, "missing"), default));
+    }
+
+    [Fact]
+    public async Task Raw_marker_waits_for_transport_clock_and_ages_out_without_fresh_cues()
+    {
+        var dir = Path.Combine(_viewer.WorkDir, "raw-src-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        var fixture = File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "synthetic", "scte35-sample.ts"));
+        var options = Microsoft.Extensions.Options.Options.Create(new ChannelStateOptions
+        {
+            WindowSegments = 4,
+            MaxMarkerHoldSeconds = 120,
+        });
+        var source = new SegmentEvidenceSource(
+            Microsoft.Extensions.Options.Options.Create(new ViewerOptions { FfmpegPath = "/nonexistent/ffmpeg" }),
+            options, _viewer.Time);
+
+        File.WriteAllBytes(Path.Combine(dir, "raw-000000.ts"), [.. fixture, .. PcrPacket(0)]);
+        Assert.Empty(await source.GetObservationsAsync("2.1", dir, default)); // both cues are future
+
+        File.WriteAllBytes(Path.Combine(dir, "raw-000001.ts"), PcrPacket(90_000));
+        Assert.Equal(90_000, MpegTsClock.FindLastPcrBase(Path.Combine(dir, "raw-000001.ts")));
+        Assert.Equal(2, new SmartTVRelay.Core.Ingest.Scte35MarkerExtractor().Extract(Path.Combine(dir, "raw-000000.ts")).Count);
+        var cueOut = await source.GetObservationsAsync("2.1", dir, default);
+        Assert.Contains(cueOut, o => o.Value == BroadcastState.Commercial && o.SourceKind == "explicit-marker");
+
+        File.WriteAllBytes(Path.Combine(dir, "raw-000002.ts"), PcrPacket(120_000));
+        var held = await source.GetObservationsAsync("2.1", dir, default);
+        Assert.Contains(held, o => o.Value == BroadcastState.Commercial);
+
+        File.WriteAllBytes(Path.Combine(dir, "raw-000003.ts"), PcrPacket(180_000));
+        var cueIn = await source.GetObservationsAsync("2.1", dir, default);
+        Assert.Contains(cueIn, o => o.Value == BroadcastState.Program && o.SourceKind == "explicit-marker");
+
+        _viewer.Time.Advance(TimeSpan.FromSeconds(121));
+        File.WriteAllBytes(Path.Combine(dir, "raw-000004.ts"), PcrPacket(190_000));
+        Assert.DoesNotContain(await source.GetObservationsAsync("2.1", dir, default),
+            o => o.SourceKind == "explicit-marker");
+    }
+
+    private static byte[] PcrPacket(long pcr)
+    {
+        var packet = Enumerable.Repeat((byte)0xFF, 188).ToArray();
+        packet[0] = 0x47;
+        packet[1] = 0x01;
+        packet[2] = 0x00;
+        packet[3] = 0x20; // adaptation only
+        packet[4] = 183;
+        packet[5] = 0x10; // PCR flag
+        packet[6] = (byte)(pcr >> 25);
+        packet[7] = (byte)(pcr >> 17);
+        packet[8] = (byte)(pcr >> 9);
+        packet[9] = (byte)(pcr >> 1);
+        packet[10] = (byte)((pcr & 1) << 7);
+        packet[11] = 0;
+        return packet;
     }
 
     private sealed class ThrowingSource : IChannelEvidenceSource
