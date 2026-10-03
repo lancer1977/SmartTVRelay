@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>TV Relay</title>
+<meta name="theme-color" content="#121826">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<header class="bar"><h1>TV Relay</h1></header>
+<main>
+  <section id="player" class="player" hidden aria-label="Player">
+    <div class="video-wrap">
+      <video id="video" playsinline controls></video>
+      <div id="overlay" class="overlay" role="status" aria-live="polite" hidden></div>
+    </div>
+    <div class="now">
+      <div class="now-text"><strong id="now-name"></strong><span id="badge" class="badge" hidden></span></div>
+      <button id="stop" type="button" class="btn">Stop</button>
+    </div>
+    <div id="error" class="error" role="alert" hidden>
+      <p id="error-text"></p>
+      <button id="retry" type="button" class="btn primary">Retry</button>
+    </div>
+  </section>
+  <section aria-label="Channels">
+    <h2>Channels</h2>
+    <p id="list-status" role="status">Loading channels…</p>
+    <ul id="channels" class="channels"></ul>
+    <button id="reload" type="button" class="btn" hidden>Reload channels</button>
+  </section>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.17/hls.min.js" integrity="sha512-iFmKfXPRVIW5PBZ3gzXSLz/IYtC6BMsIqmY/K42iuykOoUZTChDwR6KYhPcwj5HuE4hNJhZxNPD+ZdHLJvRv8A==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+<script src="/app.js"></script>
+</body>
+</html>
