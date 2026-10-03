@@ -61,7 +61,8 @@ public class LiveSmokeTests
         var result = await new LiveSmokeRunner().RunAsync(Options(), client);
 
         Assert.NotEqual(0, result.ExitCode);
-        Assert.Contains("connection refused", result.Summary, StringComparison.Ordinal);
+        Assert.Contains("HttpRequestException", result.Summary, StringComparison.Ordinal);
+        Assert.DoesNotContain("connection refused", result.Summary, StringComparison.Ordinal);
     }
 
     [Fact]
