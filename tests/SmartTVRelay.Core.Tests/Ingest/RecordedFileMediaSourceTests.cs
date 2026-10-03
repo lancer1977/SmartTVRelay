@@ -373,11 +373,94 @@ public class RecordedFileMediaSourceTests
             Assert.Equal(0, diagnostics.ProbeErrorCount);
             Assert.Equal(0, diagnostics.DecodeErrorCount);
             Assert.Equal(0, diagnostics.ReconnectAttempts);
+            Assert.Null(diagnostics.CaptionsAvailable);
+            Assert.Null(diagnostics.MarkersAvailable);
         }
         finally
         {
             File.Delete(tempFile);
         }
+    }
+
+    [Fact]
+    public async Task Diagnostics_AfterCompleteCaptureWithNoEvidence_ReportsVerifiedAbsence()
+    {
+        var fixtureFile = Path.Combine(AppContext.BaseDirectory, "captures", "sample-live-capture.ts");
+        var source = new RecordedFileMediaSource("availability-source", fixtureFile);
+
+        await foreach (var _ in source.ReadAsync(CancellationToken.None))
+        {
+        }
+
+        Assert.False(source.Diagnostics.CaptionsAvailable);
+        Assert.False(source.Diagnostics.MarkersAvailable);
+    }
+
+    [Fact]
+    public async Task Diagnostics_AfterCompleteCaptureWithMarkers_ReportsMarkersAvailable()
+    {
+        var fixtureFile = Path.Combine(AppContext.BaseDirectory, "synthetic", "scte35-sample.ts");
+        var source = new RecordedFileMediaSource("marker-source", fixtureFile);
+
+        await foreach (var _ in source.ReadAsync(CancellationToken.None))
+        {
+        }
+
+        Assert.True(source.Diagnostics.MarkersAvailable);
+    }
+
+    [Fact]
+    public async Task Diagnostics_AfterCompleteCaptureWithCaptions_ReportsCaptionsAvailable()
+    {
+        var fixtureFile = Path.Combine(AppContext.BaseDirectory, "synthetic", "captions-sample.mp4");
+        var source = new RecordedFileMediaSource("caption-source", fixtureFile);
+
+        await foreach (var _ in source.ReadAsync(CancellationToken.None))
+        {
+        }
+
+        Assert.True(source.Diagnostics.CaptionsAvailable);
+    }
+
+    [Fact]
+    public async Task Diagnostics_AfterMalformedCapture_LeavesAvailabilityUnknown()
+    {
+        var tempFile = Path.GetTempFileName();
+        try
+        {
+            await File.WriteAllBytesAsync(tempFile, new byte[] { 0x00, 0x01, 0x02, 0x03 });
+            var source = new RecordedFileMediaSource("malformed-source", tempFile);
+
+            await foreach (var _ in source.ReadAsync(CancellationToken.None))
+            {
+            }
+
+            Assert.Null(source.Diagnostics.CaptionsAvailable);
+            Assert.Null(source.Diagnostics.MarkersAvailable);
+        }
+        finally
+        {
+            File.Delete(tempFile);
+        }
+    }
+
+    [Fact]
+    public async Task Diagnostics_CancelledBeforeCompletion_LeavesAvailabilityUnknown()
+    {
+        var fixtureFile = Path.Combine(AppContext.BaseDirectory, "captures", "sample-live-capture.ts");
+        var source = new RecordedFileMediaSource("cancelled-source", fixtureFile, chunkSizeBytes: 188);
+        using var cancellation = new CancellationTokenSource();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+        {
+            await foreach (var _ in source.ReadAsync(cancellation.Token))
+            {
+                cancellation.Cancel();
+            }
+        });
+
+        Assert.Null(source.Diagnostics.CaptionsAvailable);
+        Assert.Null(source.Diagnostics.MarkersAvailable);
     }
 
     [Fact]

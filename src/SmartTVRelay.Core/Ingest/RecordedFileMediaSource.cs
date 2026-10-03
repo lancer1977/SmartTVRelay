@@ -14,6 +14,8 @@ public sealed class RecordedFileMediaSource : IBroadcastMediaSource
     private long bytesProcessed;
     private long chunksProcessed;
     private TimeSpan? lastMediaTimestamp;
+    private bool? captionsAvailable;
+    private bool? markersAvailable;
 
     /// <summary>
     /// Creates a <see cref="RecordedFileMediaSource"/> for a local MPEG-TS file.
@@ -70,7 +72,9 @@ public sealed class RecordedFileMediaSource : IBroadcastMediaSource
         lastMediaTimestamp,
         ProbeErrorCount: 0,
         DecodeErrorCount: 0,
-        ReconnectAttempts: 0);
+        ReconnectAttempts: 0,
+        CaptionsAvailable: captionsAvailable,
+        MarkersAvailable: markersAvailable);
 
     /// <summary>
     /// Streams chunks of raw bytes from the file, with deterministic timestamps.
@@ -82,6 +86,8 @@ public sealed class RecordedFileMediaSource : IBroadcastMediaSource
         bytesProcessed = 0;
         chunksProcessed = 0;
         lastMediaTimestamp = null;
+        captionsAvailable = null;
+        markersAvailable = null;
 
         // Open the file fresh on each read, in case the same source is read multiple times.
         using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: chunkSizeBytes, useAsync: true);
@@ -113,6 +119,12 @@ public sealed class RecordedFileMediaSource : IBroadcastMediaSource
 
             chunkIndex++;
         }
+
+        var availability = await RecordedAvailabilityInspector
+            .InspectAsync(filePath, cancellationToken)
+            .ConfigureAwait(false);
+        captionsAvailable = availability.CaptionsAvailable;
+        markersAvailable = availability.MarkersAvailable;
     }
 
     public ValueTask DisposeAsync()
