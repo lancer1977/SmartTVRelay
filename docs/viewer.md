@@ -23,7 +23,7 @@ Requires `ffmpeg` on PATH (or `Viewer:FfmpegPath`).
 | `Viewer:WorkDir` | `<tmp>/smarttvrelay-viewer` |
 | `Viewer:MaxChannels` | `2` |
 | `Viewer:IdleSeconds` | `30` (pipelines with no playlist/segment requests are stopped and deleted) |
-| `Viewer:StartupTimeoutSeconds` | `15` |
+| `Viewer:StartupTimeoutSeconds` | `45` |
 | `Viewer:FfmpegPath` | `ffmpeg` |
 
 State keys (`Viewer:State:*`): `PollMilliseconds` 2000, `KeepAliveSeconds` 15, `EvidenceWindowSeconds` 30 (older evidence is ignored), `ConfidenceThreshold` 0.75, `WindowSegments` 3, `AnalysisTimeoutSeconds` 10.
