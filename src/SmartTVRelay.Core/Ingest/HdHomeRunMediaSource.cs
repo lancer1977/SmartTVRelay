@@ -25,6 +25,7 @@ public sealed class HdHomeRunMediaSource : IBroadcastMediaSource
     private int reconnectAttempts;
 
     private const int MaxReconnectAttempts = 3;
+    private static readonly TimeSpan ReconnectDelay = TimeSpan.FromMilliseconds(50);
 
     public HdHomeRunMediaSource(HttpClient httpClient, string sourceId, string baseUrl, string channelGuideNumber)
     {
@@ -112,6 +113,8 @@ public sealed class HdHomeRunMediaSource : IBroadcastMediaSource
 
         // Reconnect a dropped tuner stream a bounded number of times. The lineup is resolved once;
         // reconnecting the selected stream does not require UDP discovery or a new channel lookup.
+        var reconnectAttemptsThisRead = 0;
+        var stopwatch = Stopwatch.StartNew();
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -149,13 +152,13 @@ public sealed class HdHomeRunMediaSource : IBroadcastMediaSource
                 }
                 catch (Exception ex)
                 {
+                    probeErrorCount++;
                     failure = ex;
                 }
 
                 if (failure is null && stream is not null)
                 {
                     Status = new SourceStatus(SourceHealth.Healthy);
-                    var stopwatch = Stopwatch.StartNew();
                     const int ChunkSize = 65536;
                     var buffer = new byte[ChunkSize];
 
@@ -213,12 +216,12 @@ public sealed class HdHomeRunMediaSource : IBroadcastMediaSource
                 yield break;
             }
 
-            if (reconnectAttempts >= MaxReconnectAttempts)
+            if (reconnectAttemptsThisRead >= MaxReconnectAttempts)
             {
                 var reason = streamEnded ? "stream ended" : "stream failure";
                 Status = new SourceStatus(
                     SourceHealth.Unavailable,
-                    $"[{SourceId}] HDHomeRun {reason} after {reconnectAttempts} reconnect attempts; terminal error {failure?.GetType().Name ?? "none"}");
+                    $"[{SourceId}] HDHomeRun {reason} after {reconnectAttemptsThisRead} reconnect attempts; terminal error {failure?.GetType().Name ?? "none"}");
 
                 // Preserve the existing natural-completion behavior for an exhausted clean EOF;
                 // transport/read failures remain observable to callers after retries are exhausted.
@@ -227,13 +230,15 @@ public sealed class HdHomeRunMediaSource : IBroadcastMediaSource
                     yield break;
                 }
 
-                throw failure ?? new InvalidOperationException(Status.Detail);
+                throw new InvalidOperationException(Status.Detail);
             }
 
+            reconnectAttemptsThisRead++;
             reconnectAttempts++;
+            await Task.Delay(ReconnectDelay, cancellationToken).ConfigureAwait(false);
             Status = new SourceStatus(
                 SourceHealth.Unknown,
-                $"[{SourceId}] Reconnecting HDHomeRun stream (attempt {reconnectAttempts}/{MaxReconnectAttempts})");
+                $"[{SourceId}] Reconnecting HDHomeRun stream (attempt {reconnectAttemptsThisRead}/{MaxReconnectAttempts})");
         }
     }
 

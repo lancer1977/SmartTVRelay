@@ -561,7 +561,7 @@ public class HdHomeRunMediaSourceTests
                 return new HttpResponseMessage { StatusCode = System.Net.HttpStatusCode.OK, Content = new StringContent(lineupJson) };
             }
 
-            return new HttpResponseMessage(System.Net.HttpStatusCode.ServiceUnavailable);
+            throw new HttpRequestException("Connection refused for http://192.168.0.66:5004/auto/v2.1?token=secret");
         });
 
         var client = new HttpClient(handler);
@@ -607,7 +607,9 @@ public class HdHomeRunMediaSourceTests
             await foreach (var _ in source.ReadAsync(CancellationToken.None)) { }
         }
 
-        await Assert.ThrowsAsync<IOException>(Act);
+        var terminal = await Assert.ThrowsAsync<InvalidOperationException>(Act);
+        Assert.DoesNotContain("http", terminal.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("token", terminal.Message, StringComparison.OrdinalIgnoreCase);
 
         var diagnostics = source.Diagnostics;
         Assert.Equal(0, diagnostics.ProbeErrorCount);
@@ -648,6 +650,31 @@ public class HdHomeRunMediaSourceTests
         Assert.Equal(1, source.Diagnostics.ReconnectAttempts);
         Assert.DoesNotContain("token", source.Diagnostics.Detail ?? string.Empty, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("secret", source.Diagnostics.Detail ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task ReadAsync_ReconnectKeepsSourceTimelineMonotonic()
+    {
+        var lineupJson = "[{\"GuideNumber\":\"2.1\",\"URL\":\"http://192.168.0.66:5004/auto/v2.1\"}]";
+        var streamCalls = 0;
+        var handler = new FakeHttpMessageHandler(req =>
+        {
+            if (req.RequestUri?.AbsoluteUri.Contains("lineup.json") == true)
+                return new HttpResponseMessage { Content = new StringContent(lineupJson) };
+            streamCalls++;
+            return new HttpResponseMessage { Content = new ScriptedContent(new byte[] { (byte)streamCalls }, throwAfterData: streamCalls == 1) };
+        });
+
+        var source = new HdHomeRunMediaSource(new HttpClient(handler), "source-1", "http://192.168.0.66", "2.1");
+        var chunks = new List<MediaChunk>();
+        await foreach (var chunk in source.ReadAsync(CancellationToken.None))
+        {
+            chunks.Add(chunk);
+            if (chunks.Count == 2) break;
+        }
+
+        Assert.Equal(2, chunks.Count);
+        Assert.True(chunks[1].SourceTime > chunks[0].SourceTime);
     }
 
     [Fact]
@@ -709,6 +736,23 @@ public class HdHomeRunMediaSourceTests
             public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
             public override void SetLength(long value) => throw new NotSupportedException();
             public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        }
+    }
+
+    private sealed class ScriptedContent(byte[] data, bool throwAfterData) : HttpContent
+    {
+        protected override Task SerializeToStreamAsync(Stream stream, System.Net.TransportContext? context) => throw new NotSupportedException();
+        protected override Task<Stream> CreateContentReadStreamAsync() => Task.FromResult<Stream>(new ScriptedStream(data, throwAfterData));
+        protected override bool TryComputeLength(out long length) { length = 0; return false; }
+
+        private sealed class ScriptedStream(byte[] data, bool throwAfterData) : MemoryStream(data)
+        {
+            public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+            {
+                var read = await base.ReadAsync(buffer, cancellationToken);
+                if (read == 0 && throwAfterData) throw new IOException("interrupted");
+                return read;
+            }
         }
     }
 
