@@ -22,7 +22,7 @@ public sealed record ChannelStateDto(
 public interface IChannelEvidenceSource
 {
     /// <param name="guideNumber">Channel guide number (digits and dots).</param>
-    /// <param name="workDirectory">The running pipeline's HLS work directory (seg*.ts files).</param>
+    /// <param name="workDirectory">The running pipeline's work directory, including completed raw transport windows.</param>
     Task<IReadOnlyList<Observation<BroadcastState>>> GetObservationsAsync(
         string guideNumber, string workDirectory, CancellationToken cancellationToken);
 }
@@ -40,6 +40,8 @@ public sealed class ChannelStateOptions
     public double ConfidenceThreshold { get; set; } = 0.75;
     /// <summary>Number of newest segments analysed by the default evidence source.</summary>
     public int WindowSegments { get; set; } = 3;
+    /// <summary>Maximum time to retain a timed CueOut/CueIn while fresh raw transport arrives.</summary>
+    public int MaxMarkerHoldSeconds { get; set; } = 120;
     /// <summary>Upper bound for one analysis pass of the default evidence source.</summary>
     public int AnalysisTimeoutSeconds { get; set; } = 10;
 }

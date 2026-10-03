@@ -26,12 +26,12 @@ Requires `ffmpeg` on PATH (or `Viewer:FfmpegPath`).
 | `Viewer:StartupTimeoutSeconds` | `45` |
 | `Viewer:FfmpegPath` | `ffmpeg` |
 
-State keys (`Viewer:State:*`): `PollMilliseconds` 2000, `KeepAliveSeconds` 15, `EvidenceWindowSeconds` 30 (older evidence is ignored), `ConfidenceThreshold` 0.75, `WindowSegments` 3, `AnalysisTimeoutSeconds` 10.
+State keys (`Viewer:State:*`): `PollMilliseconds` 2000, `KeepAliveSeconds` 15, `EvidenceWindowSeconds` 30 (older evidence is ignored), `ConfidenceThreshold` 0.75, `WindowSegments` 3, `MaxMarkerHoldSeconds` 120, `AnalysisTimeoutSeconds` 10.
 
 ## Detection state
 Observations come from `IChannelEvidenceSource` and are fused by Core's `BroadcastStateFusion` (Observation Core). No evidence, stale evidence, disputed/conflicting evidence, a source failure, or fused confidence below `ConfidenceThreshold` all report `Unknown` with low confidence (<= 0.2); `Commercial` is only reported with agreeing, confident evidence. The state endpoints only report; nothing here switches or substitutes the stream.
 
-The default `SegmentEvidenceSource` concatenates the newest segments and runs the existing SCTE-35 extractor and black-frame detector. The viewer's ffmpeg re-encode does not carry SCTE-35 through, and black frames alone yield sub-threshold `Transition` evidence, so on real captures the state is expected to be `Unknown` until stronger detectors are wired into the source.
+The viewer opens one tuner stream and tees its original MPEG-TS bytes to ffmpeg and a bounded set of local raw capture windows. `SegmentEvidenceSource` inspects completed raw windows, not the re-encoded HLS segments. A SCTE-35 cue is used only after the raw transport PCR reaches its PTS; an uncorrelated or future cue remains `Unknown`. A CueOut/CueIn is retained for at most 120 seconds while fresh transport arrives. Stalled capture ages out, and black frames alone remain sub-threshold. A broadcast without suitable markers or corroborating evidence still reports `Unknown`.
 
 ffmpeg processes are killed and work dirs deleted on host shutdown.
 
