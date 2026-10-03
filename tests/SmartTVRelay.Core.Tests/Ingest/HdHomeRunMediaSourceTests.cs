@@ -574,7 +574,7 @@ public class HdHomeRunMediaSourceTests
 
         await Assert.ThrowsAsync<InvalidOperationException>(Act);
 
-        Assert.Equal(1, source.Diagnostics.ProbeErrorCount);
+        Assert.Equal(4, source.Diagnostics.ProbeErrorCount);
         Assert.Equal(0, source.Diagnostics.DecodeErrorCount);
     }
 
@@ -611,7 +611,72 @@ public class HdHomeRunMediaSourceTests
 
         var diagnostics = source.Diagnostics;
         Assert.Equal(0, diagnostics.ProbeErrorCount);
-        Assert.Equal(1, diagnostics.DecodeErrorCount);
+        Assert.Equal(4, diagnostics.DecodeErrorCount);
+        Assert.Equal(3, diagnostics.ReconnectAttempts);
+    }
+
+    [Fact]
+    public async Task ReadAsync_ReconnectsAfterInterruptionAndYieldsRecoveryData()
+    {
+        var lineupJson = "[{\"GuideNumber\":\"2.1\",\"URL\":\"http://192.168.0.66:5004/auto/v2.1?token=secret\"}]";
+        var streamCalls = 0;
+        var handler = new FakeHttpMessageHandler(req =>
+        {
+            if (req.RequestUri?.AbsoluteUri.Contains("lineup.json") == true)
+            {
+                return new HttpResponseMessage { StatusCode = System.Net.HttpStatusCode.OK, Content = new StringContent(lineupJson) };
+            }
+
+            streamCalls++;
+            return new HttpResponseMessage
+            {
+                StatusCode = System.Net.HttpStatusCode.OK,
+                Content = streamCalls == 1 ? new ThrowingContent() : new ByteArrayContent(new byte[] { 0x47, 0x01 }),
+            };
+        });
+
+        var source = new HdHomeRunMediaSource(new HttpClient(handler), "source-1", "http://192.168.0.66", "2.1");
+        var chunks = new List<MediaChunk>();
+        await foreach (var chunk in source.ReadAsync(CancellationToken.None))
+        {
+            chunks.Add(chunk);
+        }
+
+        Assert.Equal(2, streamCalls);
+        Assert.Single(chunks);
+        Assert.Equal(new byte[] { 0x47, 0x01 }, chunks[0].Data.ToArray());
+        Assert.Equal(1, source.Diagnostics.ReconnectAttempts);
+        Assert.DoesNotContain("token", source.Diagnostics.Detail ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("secret", source.Diagnostics.Detail ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task ReadAsync_CancellationStopsReconnectsWithoutAdditionalAttempt()
+    {
+        var lineupJson = "[{\"GuideNumber\":\"2.1\",\"URL\":\"http://192.168.0.66:5004/auto/v2.1\"}]";
+        var streamCalls = 0;
+        var handler = new FakeHttpMessageHandler(req =>
+        {
+            if (req.RequestUri?.AbsoluteUri.Contains("lineup.json") == true)
+            {
+                return new HttpResponseMessage { StatusCode = System.Net.HttpStatusCode.OK, Content = new StringContent(lineupJson) };
+            }
+
+            streamCalls++;
+            return new HttpResponseMessage { StatusCode = System.Net.HttpStatusCode.OK, Content = new ThrowingContent() };
+        });
+
+        var source = new HdHomeRunMediaSource(new HttpClient(handler), "source-1", "http://192.168.0.66", "2.1");
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+        {
+            await foreach (var _ in source.ReadAsync(cts.Token)) { }
+        });
+
+        Assert.Equal(0, streamCalls);
+        Assert.Equal(0, source.Diagnostics.ReconnectAttempts);
     }
 
     /// <summary>HttpContent whose stream throws on the first read, after headers/connection succeed --
