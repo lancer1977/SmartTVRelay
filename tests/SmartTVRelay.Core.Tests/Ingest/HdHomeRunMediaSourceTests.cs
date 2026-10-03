@@ -524,7 +524,7 @@ public class HdHomeRunMediaSourceTests
     public async Task ReadAsync_LineupTransportFailureDoesNotExposeEndpointSecret()
     {
         var handler = new FakeHttpMessageHandler(_ =>
-            throw new HttpRequestException("Failed at http://192.168.0.66/private?token=secret"));
+            throw new HttpRequestException("Bearer test-secret"));
         var source = new HdHomeRunMediaSource(
             new HttpClient(handler), "source-1", "http://192.168.0.66/private?token=secret", "2.1");
 
@@ -538,6 +538,55 @@ public class HdHomeRunMediaSourceTests
         Assert.DoesNotContain("?token=", error.Message, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("secret", error.Message, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("secret", source.Diagnostics.Detail ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task ReadAsync_LineupReasonPhraseDoesNotExposeEndpointSecret()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(System.Net.HttpStatusCode.BadGateway)
+        {
+            ReasonPhrase = "Bearer test-secret at http://device/stream?token=secret",
+        });
+        var source = new HdHomeRunMediaSource(new HttpClient(handler), "source-1", "http://192.168.0.66", "2.1");
+
+        async Task Act()
+        {
+            await foreach (var _ in source.ReadAsync(CancellationToken.None)) { }
+        }
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(Act);
+        Assert.Contains("HTTP 502", error.Message);
+        Assert.DoesNotContain("secret", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("secret", source.Diagnostics.Detail ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ReadAsync_DisposesLineupResponseContent(bool success)
+    {
+        var content = new TrackingContent(success
+            ? "[{\"GuideNumber\":\"2.1\",\"URL\":\"http://192.168.0.66:5004/auto/v2.1\"}]"
+            : "unavailable");
+        var handler = new FakeHttpMessageHandler(req =>
+            req.RequestUri?.AbsoluteUri.Contains("lineup.json") == true
+                ? new HttpResponseMessage(success ? System.Net.HttpStatusCode.OK : System.Net.HttpStatusCode.BadGateway) { Content = content }
+                : new HttpResponseMessage { Content = new ByteArrayContent(new byte[] { 0x47 }) });
+        var source = new HdHomeRunMediaSource(new HttpClient(handler), "source-1", "http://192.168.0.66", "2.1");
+
+        if (success)
+        {
+            await foreach (var _ in source.ReadAsync(CancellationToken.None)) { }
+        }
+        else
+        {
+            await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            {
+                await foreach (var _ in source.ReadAsync(CancellationToken.None)) { }
+            });
+        }
+
+        Assert.True(content.Disposed);
     }
 
     [Fact]
@@ -773,6 +822,17 @@ public class HdHomeRunMediaSourceTests
                 if (read == 0 && throwAfterData) throw new IOException("interrupted");
                 return read;
             }
+        }
+    }
+
+    private sealed class TrackingContent(string value) : StringContent(value)
+    {
+        public bool Disposed { get; private set; }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) Disposed = true;
+            base.Dispose(disposing);
         }
     }
 

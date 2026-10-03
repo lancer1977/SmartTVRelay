@@ -70,11 +70,11 @@ public sealed class HdHomeRunMediaSource : IBroadcastMediaSource
         try
         {
             var lineupUrl = $"{baseUrl}/lineup.json";
-            var lineupResponse = await httpClient.GetAsync(lineupUrl, cancellationToken).ConfigureAwait(false);
+            using var lineupResponse = await httpClient.GetAsync(lineupUrl, cancellationToken).ConfigureAwait(false);
 
             if (!lineupResponse.IsSuccessStatusCode)
             {
-                var detail = $"[{SourceId}] Failed to reach HDHomeRun lineup at {DescribeEndpoint(lineupUrl)}: HTTP {(int)lineupResponse.StatusCode} {lineupResponse.ReasonPhrase}";
+                var detail = $"[{SourceId}] Failed to reach HDHomeRun lineup at {DescribeEndpoint(lineupUrl)}: HTTP {(int)lineupResponse.StatusCode}";
                 probeErrorCount++;
                 Status = new SourceStatus(SourceHealth.Unavailable, detail);
                 throw new InvalidOperationException(detail);
@@ -102,10 +102,9 @@ public sealed class HdHomeRunMediaSource : IBroadcastMediaSource
         }
         catch (Exception ex)
         {
-            var safeError = ex.Message.Contains("http", StringComparison.OrdinalIgnoreCase) || ex.Message.Contains('?')
-                ? ex.GetType().Name
-                : ex.Message;
-            var detail = $"[{SourceId}] Failed to reach HDHomeRun lineup at {DescribeEndpoint(baseUrl)}: {safeError}";
+            // Remote exception text may contain URL paths, query tokens, or credentials in
+            // forms that cannot be reliably recognized. Expose only the exception type.
+            var detail = $"[{SourceId}] Failed to reach HDHomeRun lineup at {DescribeEndpoint(baseUrl)}: {ex.GetType().Name}";
             probeErrorCount++;
             Status = new SourceStatus(SourceHealth.Unavailable, detail);
             // The transport exception may contain the original URL and query string.
