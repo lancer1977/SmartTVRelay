@@ -3,7 +3,7 @@ using Microsoft.Extensions.Options;
 
 namespace SmartTVRelay.Viewer;
 
-public sealed class ProcessFfmpegRunner(IOptions<ViewerOptions> options) : IFfmpegRunner
+public sealed class ProcessFfmpegRunner(IOptions<ViewerOptions> options, IHttpClientFactory clients) : IFfmpegRunner
 {
     public IFfmpegProcess Start(FfmpegStartInfo info)
     {
@@ -20,7 +20,9 @@ public sealed class ProcessFfmpegRunner(IOptions<ViewerOptions> options) : IFfmp
             "-probesize", options.Value.ProbeSize,
             "-analyzeduration", options.Value.AnalyzeDurationUs.ToString(System.Globalization.CultureInfo.InvariantCulture),
             "-fflags", "+genpts+discardcorrupt",
-            "-i", info.InputUrl,
+            // The tuner is opened once by the raw transport tap. ffmpeg reads that same
+            // stream from stdin while the tap retains bounded original MPEG-TS evidence.
+            "-i", "pipe:0",
             "-vf", "yadif", "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
             "-force_key_frames", "expr:gte(t,n_forced*4)",
             "-c:a", "aac", "-b:a", "128k", "-ac", "2",
@@ -39,10 +41,36 @@ public sealed class ProcessFfmpegRunner(IOptions<ViewerOptions> options) : IFfmp
         process.ErrorDataReceived += (_, _) => { };
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
-        return new Handle(process);
+        var cancellation = new CancellationTokenSource();
+        var pump = PumpAsync(process, info, cancellation.Token);
+        return new Handle(process, cancellation, pump);
     }
 
-    private sealed class Handle(Process process) : IFfmpegProcess
+    private async Task PumpAsync(Process process, FfmpegStartInfo info, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var client = clients.CreateClient("viewer-stream");
+            using var response = await client.GetAsync(
+                info.InputUrl, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+            response.EnsureSuccessStatusCode();
+            await using var source = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+            await new RawTransportTap().CopyAsync(
+                source, process.StandardInput.BaseStream, info.OutputDirectory, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        catch (Exception)
+        {
+            // An unavailable source ends ffmpeg's input; the viewer reports a startup
+            // failure and retains no evidence. Do not log the upstream URL or error text.
+        }
+        finally
+        {
+            try { process.StandardInput.Close(); } catch (Exception) { }
+        }
+    }
+
+    private sealed class Handle(Process process, CancellationTokenSource cancellation, Task pump) : IFfmpegProcess
     {
         public bool HasExited
         {
@@ -54,6 +82,7 @@ public sealed class ProcessFfmpegRunner(IOptions<ViewerOptions> options) : IFfmp
 
         public void Kill()
         {
+            try { cancellation.Cancel(); } catch (ObjectDisposedException) { }
             try { if (!process.HasExited) process.Kill(entireProcessTree: true); }
             catch (InvalidOperationException) { }
         }
@@ -61,6 +90,8 @@ public sealed class ProcessFfmpegRunner(IOptions<ViewerOptions> options) : IFfmp
         public void Dispose()
         {
             Kill();
+            try { pump.Wait(TimeSpan.FromSeconds(2)); } catch (Exception) { }
+            cancellation.Dispose();
             process.Dispose();
         }
     }

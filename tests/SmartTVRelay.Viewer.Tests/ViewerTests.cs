@@ -76,6 +76,20 @@ public sealed class ViewerTests : IDisposable
     }
 
     [Fact]
+    public async Task RawCaptureFiles_AreNotServedAsHlsSegments()
+    {
+        await _c.GetAsync("/hls/2.1/index.m3u8");
+        var dir = Assert.Single(_f.Runner.Started).Info.OutputDirectory;
+        File.WriteAllBytes(Path.Combine(dir, "raw-000001.ts"), [0x47]);
+
+        Assert.Equal(HttpStatusCode.NotFound, (await _c.GetAsync("/hls/2.1/raw-000001.ts")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await _c.GetAsync("/hls/2.1/seg00000.ts")).StatusCode);
+        if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute,
+                File.GetUnixFileMode(dir));
+    }
+
+    [Fact]
     public async Task ThirdChannel_Returns503WithMessage()
     {
         Assert.Equal(HttpStatusCode.OK, (await _c.GetAsync("/hls/2.1/index.m3u8")).StatusCode);

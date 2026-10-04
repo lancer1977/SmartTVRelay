@@ -11,6 +11,7 @@ builder.Services.Configure<ViewerOptions>(builder.Configuration.GetSection("View
 builder.Services.Configure<TunerOptions>(builder.Configuration.GetSection("Tuner"));
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddHttpClient<ITunerLineup, HttpTunerLineup>(c => c.Timeout = TimeSpan.FromSeconds(10));
+builder.Services.AddHttpClient("viewer-stream", c => c.Timeout = Timeout.InfiniteTimeSpan);
 builder.Services.AddSingleton<IFfmpegRunner, ProcessFfmpegRunner>();
 builder.Services.AddSingleton<ChannelPipelineManager>();
 builder.Services.AddSingleton<IChannelPipelineRegistry>(sp => sp.GetRequiredService<ChannelPipelineManager>());
@@ -40,7 +41,7 @@ app.MapGet("/hls/{guideNumber}/{file}", async (string guideNumber, string file, 
 {
     if (!ChannelPipelineManager.IsValidGuideNumber(guideNumber)) return Results.NotFound();
     var isPlaylist = file == "index.m3u8";
-    if (!isPlaylist && !(file.EndsWith(".ts", StringComparison.Ordinal) && IsSafeFileName(file)))
+    if (!isPlaylist && !IsHlsSegment(file))
         return Results.NotFound();
 
     string path;
@@ -93,8 +94,14 @@ app.MapGet("/hls/{guideNumber}/{file}", async (string guideNumber, string file, 
 
 app.Run();
 
-static bool IsSafeFileName(string name) =>
-    name.Length <= 64 && name.All(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '-' or '.') && !name.Contains("..");
+static bool IsHlsSegment(string name)
+{
+    if (name.Length is < 7 or > 64 || !name.StartsWith("seg", StringComparison.Ordinal)
+        || !name.EndsWith(".ts", StringComparison.Ordinal)) return false;
+    for (var i = 3; i < name.Length - 3; i++)
+        if (!char.IsAsciiDigit(name[i])) return false;
+    return true;
+}
 
 /// <summary>Entry point marker so WebApplicationFactory can host the app in tests.</summary>
 public partial class Program;
