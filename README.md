@@ -1,5 +1,7 @@
 # SmartTVRelay
 
+Private DreadTV tuner-service packaging: [deployment contract](deploy/README.md).
+
 SmartTVRelay is a perception and relay harness built on [Observation.Core](https://github.com/lancer1977/observation-core).
 
 This bootstrap tracks the [SmartTVRelay epic](https://github.com/lancer1977/SmartTVRelay/issues/1) and the [Observation.Core bootstrap issue](https://github.com/lancer1977/observation-core/issues/1).

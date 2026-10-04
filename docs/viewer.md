@@ -7,6 +7,7 @@ Requires `ffmpeg` on PATH (or `Viewer:FfmpegPath`).
 | Endpoint | Behaviour |
 | --- | --- |
 | `GET /api/channels` | `[{"guideNumber","name","videoCodec"}]` from `{Tuner:BaseUrl}/lineup.json`; 502 if tuner unreachable |
+| `GET /healthz` | Process liveness only; does not probe the tuner or claim RF/playback health |
 | `GET /hls/{guideNumber}/index.m3u8` | Starts one ffmpeg per channel on first request, waits up to `Viewer:StartupTimeoutSeconds` for the playlist (504 on timeout). Unknown channel 404; over cap 503 |
 | `GET /hls/{guideNumber}/segNNNNN.ts` | Segment from the running pipeline; 404 if not running |
 
