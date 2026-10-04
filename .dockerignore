@@ -1,0 +1,12 @@
+.git
+.worktrees
+.github
+docs
+fixtures
+tests
+artifacts
+**/bin
+**/obj
+**/.serena
+*.user
+*.suo

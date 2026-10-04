@@ -22,6 +22,8 @@ var app = builder.Build();
 app.UseDefaultFiles();
 app.UseStaticFiles();
 app.MapChannelState();
+// Process liveness only. Tuner reachability and RF/program state have separate endpoints.
+app.MapGet("/healthz", () => Results.Ok(new { status = "ok", service = "SmartTVRelay.Viewer" }));
 
 app.MapGet("/api/channels", async (ITunerLineup lineup, CancellationToken ct) =>
 {

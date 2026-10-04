@@ -26,6 +26,16 @@ public sealed class ViewerTests : IDisposable
     }
 
     [Fact]
+    public async Task Healthz_IsProcessLivenessWithoutStartingTuner()
+    {
+        var response = await _c.GetAsync("/healthz");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("ok", (await response.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("status").GetString());
+        Assert.Empty(_f.Tuner.Requests);
+        Assert.Empty(_f.Runner.Started);
+    }
+
+    [Fact]
     public async Task Channels_MapsLineupToCamelCaseContract()
     {
         var res = await _c.GetAsync("/api/channels");
