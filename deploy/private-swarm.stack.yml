@@ -1,0 +1,47 @@
+services:
+  smarttvrelay-viewer:
+    image: ${SMARTTV_VIEWER_IMAGE:?set_SMARTTV_VIEWER_IMAGE}
+    read_only: true
+    environment:
+      ASPNETCORE_URLS: http://0.0.0.0:5189
+      DOTNET_EnableDiagnostics: "0"
+      Tuner__BaseUrl: ${SMARTTV_TUNER_BASE_URL:?set_SMARTTV_TUNER_BASE_URL}
+      Tuner__StreamPort: ${SMARTTV_TUNER_STREAM_PORT:-5004}
+      Viewer__MaxChannels: "2"
+      Viewer__IdleSeconds: "30"
+      Viewer__WorkDir: /tmp/smarttvrelay-viewer
+    volumes:
+      # Swarm uses a tmpfs mount, not the docker-run-only --tmpfs flag.
+      - type: tmpfs
+        target: /tmp
+        tmpfs:
+          size: 536870912
+    networks:
+      dreadtv-internal:
+        aliases:
+          - smarttvrelay-internal
+      dreadtv-egress: {}
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.hostname == ${SMARTTV_NODE_HOSTNAME:?set_SMARTTV_NODE_HOSTNAME}
+      update_config:
+        parallelism: 1
+        order: stop-first
+      rollback_config:
+        parallelism: 1
+        order: stop-first
+      resources:
+        limits:
+          memory: 2G
+    # No published ports or Traefik route. DreadTV is the viewer access boundary.
+
+networks:
+  dreadtv-internal:
+    external: true
+    name: ${DREADTV_INTERNAL_NETWORK:?set_DREADTV_INTERNAL_NETWORK}
+  dreadtv-egress:
+    external: true
+    name: ${DREADTV_EGRESS_NETWORK:?set_DREADTV_EGRESS_NETWORK}

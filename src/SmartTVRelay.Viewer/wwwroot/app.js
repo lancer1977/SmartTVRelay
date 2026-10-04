@@ -6,6 +6,8 @@
   const listEl = $('channels'), listStatus = $('list-status');
 
   let hls = null, current = null, tuneTimer = null, stallTimer = null, events = null, evRetry = null, evDelay = 2000, session = 0;
+  let manualUntil = 0, manualTimer = null;
+  const MANUAL_BREAK_MS = 120000;
 
   const BADGES = {
     Program: ['program', 'Program'],
@@ -57,9 +59,26 @@
     }
   }
 
+  function renderManualBreak() {
+    const remaining = Math.max(0, Math.ceil((manualUntil - Date.now()) / 1000));
+    if (!remaining) {
+      clearInterval(manualTimer); manualTimer = null; manualUntil = 0;
+    }
+    $('mark-break').hidden = !!remaining;
+    $('end-break').hidden = !remaining;
+    const status = $('manual-status');
+    status.hidden = !remaining;
+    if (remaining) status.textContent = 'Manual break · ' + Math.floor(remaining / 60) + ':' + String(remaining % 60).padStart(2, '0');
+  }
+
+  function clearManualBreak() {
+    manualUntil = 0;
+    renderManualBreak();
+  }
+
   function teardown() {
     session++;
-    clearTimers(); stopEvents();
+    clearTimers(); stopEvents(); clearManualBreak();
     if (hls) { hls.destroy(); hls = null; }
     video.pause(); video.removeAttribute('src'); video.load(); // releases the HLS request so the idle reaper frees the tuner
   }
@@ -151,6 +170,14 @@
   }
 
   $('stop').addEventListener('click', stop);
+  $('mark-break').addEventListener('click', () => {
+    if (!current) return;
+    manualUntil = Date.now() + MANUAL_BREAK_MS;
+    renderManualBreak();
+    clearInterval(manualTimer);
+    manualTimer = setInterval(renderManualBreak, 1000);
+  });
+  $('end-break').addEventListener('click', clearManualBreak);
   $('retry').addEventListener('click', () => { if (current) play(current); });
   $('reload').addEventListener('click', loadChannels);
   window.addEventListener('pagehide', teardown);
