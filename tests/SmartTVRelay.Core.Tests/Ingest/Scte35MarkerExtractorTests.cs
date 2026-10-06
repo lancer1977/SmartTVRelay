@@ -44,6 +44,80 @@ public class Scte35MarkerExtractorTests
         Assert.Equal(DateTimeOffset.UnixEpoch + TimeSpan.FromSeconds(2.0), cueIn.ObservedAt);
     }
 
+    [Theory]
+    [InlineData("scte35-time-signal-202-36.ts", ExplicitMarkerKind.CueOut, 7_107_207_073L)]
+    [InlineData("scte35-time-signal-203-36.ts", ExplicitMarkerKind.CueOut, 7_122_089_941L)]
+    [InlineData("scte35-time-signal-203-37.ts", ExplicitMarkerKind.CueIn, 7_123_441_291L)]
+    public void Extract_RealIssue124TimeSignalFixture_UsesHandDecodedOracle(string filename, ExplicitMarkerKind expectedKind, long expectedPts)
+    {
+        // The section bytes are copied verbatim from issue #124. The expected PTS values below
+        // were decoded independently from the spec's time_signal splice_time: low bit of its
+        // first byte followed by four big-endian bytes; pts_adjustment is zero in all three.
+        var signals = _extractor.Extract(GetFixturePath(filename));
+        var signal = Assert.Single(signals);
+        Assert.Equal(expectedKind, signal.Kind);
+        Assert.Equal(DateTimeOffset.UnixEpoch + TimeSpan.FromSeconds(expectedPts / 90_000.0), signal.ObservedAt);
+    }
+
+    [Fact]
+    public void Extract_TimeSignalSegmentationCancelAndUnknownType_AreIgnored()
+    {
+        var filePath = Path.Combine(Path.GetTempPath(), $"scte35-time-cancel-{Guid.NewGuid()}.ts");
+        try
+        {
+            WriteHandCraftedTimeSignalFixture(filePath, segmentationEventId: 0x203, segmentationType: 0x36,
+                canceled: true);
+            Assert.Empty(_extractor.Extract(filePath));
+            WriteHandCraftedTimeSignalFixture(filePath, segmentationEventId: 0x203, segmentationType: 0x99);
+            Assert.Empty(_extractor.Extract(filePath));
+        }
+        finally { File.Delete(filePath); }
+    }
+
+    [Fact]
+    public void Extract_TruncatedTimeSignalSection_ReturnsEmpty()
+    {
+        var filePath = Path.Combine(Path.GetTempPath(), $"scte35-time-truncated-{Guid.NewGuid()}.ts");
+        try
+        {
+            // Complete PSI framing, but the SCTE-35 section declares bytes beyond its supplied body.
+            using var fs = new FileStream(filePath, FileMode.Create, FileAccess.Write);
+            using var writer = new BinaryWriter(fs);
+            WriteSection(writer, 0x0000, BuildPatSection(0x0200));
+            WriteSection(writer, 0x0200, BuildPmtSection(0x0201));
+            WriteSection(writer, 0x0201, new byte[] { 0xFC, 0xB0, 0x2D, 0x00, 0x00, 0x00 });
+            writer.Flush();
+            Assert.Empty(_extractor.Extract(filePath));
+        }
+        finally { File.Delete(filePath); }
+    }
+
+    private static void WriteHandCraftedTimeSignalFixture(string filePath, uint segmentationEventId, byte segmentationType, bool canceled = false)
+    {
+        // Independent test oracle layout from ANSI/SCTE 35: time_signal command 0x06,
+        // specified PTS 90000 in five bytes, descriptor_loop_length, tag/length, CUEI,
+        // event ID, cancel byte, program/duration/delivery flags, UPID, type, segment counters.
+        byte[] descriptor = { 0x02, 0x14, 0x43, 0x55, 0x45, 0x49,
+            (byte)(segmentationEventId >> 24), (byte)(segmentationEventId >> 16), (byte)(segmentationEventId >> 8), (byte)segmentationEventId,
+            (byte)(canceled ? 0x80 : 0x00), 0xE0, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, segmentationType, 0x00, 0x01 };
+        // The uncanceled descriptor includes duration, an empty UPID, type, and segment counters.
+        if (canceled) descriptor = descriptor[..11];
+        descriptor[1] = (byte)(descriptor.Length - 2);
+        var section = new List<byte> { 0xFC, 0xB0, 0x00, 0x00, 0, 0, 0, 0, 0, 0, 0x00, 0xFF, 0xF0, 0x06,
+            0x06, 0x80, 0x00, 0x01, 0x5F, 0x90, (byte)(descriptor.Length >> 8), (byte)descriptor.Length };
+        section.AddRange(descriptor);
+        section.AddRange(new byte[] { 0, 0, 0, 0 });
+        int sectionLength = section.Count - 3;
+        section[1] = (byte)(0xB0 | (sectionLength >> 8)); section[2] = (byte)sectionLength;
+        using var fs = new FileStream(filePath, FileMode.Create, FileAccess.Write);
+        using var writer = new BinaryWriter(fs);
+        WriteSection(writer, 0, BuildPatSection(0x0200));
+        WriteSection(writer, 0x0200, BuildPmtSection(0x0201));
+        WriteSection(writer, 0x0201, section.ToArray());
+        writer.Flush();
+    }
+
     [Fact]
     public void Extract_HandCraftedSpecCompliantSection_DecodesCorrectPtsTime()
     {
