@@ -6,13 +6,16 @@ using System.IO;
 using System.Threading;
 
 /// <summary>
-/// Extracts SCTE-35 splice_insert commands from MPEG-TS transport stream files.
+/// Extracts supported SCTE-35 splice_insert and time_signal commands from MPEG-TS transport stream files.
 /// Parses the PAT to locate the PMT, then the PMT to find SCTE-35 streams (stream_type 0x86),
-/// and finally extracts splice_insert commands as timestamped ExplicitMarkerSignal values.
+/// and finally extracts supported commands as timestamped ExplicitMarkerSignal values.
 ///
-/// Supports splice_insert (command_type 0x05) only. Other splice_command_types are safely ignored.
+/// Supports splice_insert (command_type 0x05) and time_signal (0x06) with CUEI segmentation descriptors.
+/// Segmentation start/end types explicitly recognized are Break (0x22/0x23), Provider Advertisement
+/// (0x30/0x31), Distributor Advertisement (0x32/0x33), Provider Placement Opportunity (0x34/0x35),
+/// and Distributor Placement Opportunity (0x36/0x37). Other types and descriptors are ignored.
 /// No CRC validation, no encrypted_packet support, no component-splice-per-PID variants, no
-/// duration/avail descriptor fields. Immediate splices (splice_immediate_flag=1), and any
+/// avail fields. Immediate splices (splice_immediate_flag=1), and any
 /// splice_time() with time_specified_flag=0, carry no reliable timestamp in the section at all.
 /// Since this class only parses recorded files, DateTimeOffset.UtcNow at parse time has no
 /// relationship to broadcast time, so these cases emit no signal rather than a fabricated one
@@ -35,6 +38,8 @@ public sealed class Scte35MarkerExtractor
     private const byte SCTE35_TABLE_ID = 0xFC;
     private const byte SCTE35_STREAM_TYPE = 0x86;
     private const byte SPLICE_INSERT_COMMAND = 0x05;
+    private const byte TIME_SIGNAL_COMMAND = 0x06;
+    private const byte SEGMENTATION_DESCRIPTOR_TAG = 0x02;
 
     /// <summary>
     /// Parses a recorded MPEG-TS file, locates the PID carrying SCTE-35 splice_info_section
@@ -69,7 +74,7 @@ public sealed class Scte35MarkerExtractor
                 return signals;
             }
 
-            ExtractSpliceInserts(reader, scte35Pid.Value, signals, cancellationToken);
+            ExtractSpliceCommands(reader, scte35Pid.Value, signals, cancellationToken);
 
             return signals;
         }
@@ -436,7 +441,7 @@ public sealed class Scte35MarkerExtractor
         return null;
     }
 
-    private void ExtractSpliceInserts(BinaryReader reader, int scte35Pid, List<ExplicitMarkerSignal> signals, CancellationToken cancellationToken)
+    private void ExtractSpliceCommands(BinaryReader reader, int scte35Pid, List<ExplicitMarkerSignal> signals, CancellationToken cancellationToken)
     {
         // splice_event_id is scoped per-PID for the lifetime of this extraction, not per section:
         // a later splice_insert cancelling an earlier one by event_id can arrive in any later
@@ -509,9 +514,9 @@ public sealed class Scte35MarkerExtractor
         ulong ptsAdjustment = ExtractPtsTime33(data, 4);
 
         byte spliceCommandType = data[commandTypeIndex];
-        if (spliceCommandType != SPLICE_INSERT_COMMAND)
+        if (spliceCommandType is not (SPLICE_INSERT_COMMAND or TIME_SIGNAL_COMMAND))
         {
-            return; // Only splice_insert is handled; other command types are safely ignored.
+            return;
         }
 
         // tier(12 bits) + splice_command_length(12 bits): data[10..12]. 0xFFF is the spec's
@@ -525,7 +530,107 @@ public sealed class Scte35MarkerExtractor
             commandEnd = Math.Min(commandEnd, commandStart + spliceCommandLength);
         }
 
-        TryParseSpliceInsert(data, commandStart, commandEnd, ptsAdjustment, pendingSignals, canceledEventIds);
+        if (spliceCommandType == SPLICE_INSERT_COMMAND)
+        {
+            TryParseSpliceInsert(data, commandStart, commandEnd, ptsAdjustment, pendingSignals, canceledEventIds);
+        }
+        else
+        {
+                TryParseTimeSignal(data, commandStart, commandEnd, sectionEnd, ptsAdjustment, pendingSignals, canceledEventIds);
+        }
+    }
+
+    private static void TryParseTimeSignal(byte[] data, int commandStart, int commandEnd, int sectionEnd, ulong ptsAdjustment, List<(uint EventId, ExplicitMarkerSignal Signal)> pendingSignals, HashSet<uint> canceledEventIds)
+    {
+        // time_signal() consists of one splice_time(). time_specified_flag=0 has no PTS and
+        // therefore cannot safely create timestamped evidence for a recorded stream.
+        if (commandStart >= commandEnd || (data[commandStart] & 0x80) == 0 || commandStart + 5 > commandEnd)
+        {
+            return;
+        }
+
+        ulong ptsTime = ExtractPtsTime33(data, commandStart);
+        ulong adjustedPtsTime = (ptsTime + ptsAdjustment) & 0x1FFFFFFFFUL;
+        var observedAt = DateTimeOffset.UnixEpoch + TimeSpan.FromSeconds(adjustedPtsTime / 90000.0);
+
+        int descriptorLengthIndex = commandEnd;
+        if (descriptorLengthIndex + 2 > sectionEnd - 4)
+        {
+            return;
+        }
+
+        int descriptorLoopLength = (data[descriptorLengthIndex] << 8) | data[descriptorLengthIndex + 1];
+        int descriptorStart = descriptorLengthIndex + 2;
+        int descriptorEnd = descriptorStart + descriptorLoopLength;
+        if (descriptorEnd > sectionEnd - 4)
+        {
+            return;
+        }
+
+        int i = descriptorStart;
+        while (i + 2 <= descriptorEnd)
+        {
+            int tag = data[i++];
+            int length = data[i++];
+            if (i + length > descriptorEnd) return;
+            if (tag == SEGMENTATION_DESCRIPTOR_TAG)
+            {
+                TryParseSegmentationDescriptor(data, i, i + length, observedAt, pendingSignals, canceledEventIds);
+            }
+            i += length;
+        }
+    }
+
+    private static void TryParseSegmentationDescriptor(byte[] data, int start, int end, DateTimeOffset observedAt, List<(uint EventId, ExplicitMarkerSignal Signal)> pendingSignals, HashSet<uint> canceledEventIds)
+    {
+        // CUEI + segmentation_event_id + cancel byte are the mandatory prefix.
+        if (end - start < 9 || data[start] != (byte)'C' || data[start + 1] != (byte)'U' || data[start + 2] != (byte)'E' || data[start + 3] != (byte)'I') return;
+        int i = start + 4;
+        uint eventId = (uint)((data[i] << 24) | (data[i + 1] << 16) | (data[i + 2] << 8) | data[i + 3]);
+        i += 4;
+        bool canceled = (data[i++] & 0x80) != 0;
+        if (canceled)
+        {
+            canceledEventIds.Add(eventId);
+            return;
+        }
+        if (i >= end) return;
+
+        byte flags = data[i++];
+        bool programSegmentation = (flags & 0x80) != 0;
+        bool durationFlag = (flags & 0x40) != 0;
+        bool deliveryNotRestricted = (flags & 0x20) != 0;
+        if (!deliveryNotRestricted)
+        {
+            if (i >= end) return;
+            i++; // five delivery restriction flags plus three reserved bits
+        }
+
+        if (!programSegmentation)
+        {
+            if (i >= end) return;
+            int componentCount = data[i++];
+            if (i + componentCount * 6 > end) return;
+            i += componentCount * 6; // component_tag + 40-bit pts_offset
+        }
+        if (durationFlag)
+        {
+            if (i + 5 > end) return;
+            i += 5; // 40-bit segmentation_duration; not needed for signal timestamping
+        }
+        if (i + 2 > end) return;
+        int upidLength = data[i + 1];
+        i += 2;
+        if (i + upidLength + 3 > end) return;
+        i += upidLength;
+        byte type = data[i];
+        ExplicitMarkerKind? kind = type switch
+        {
+            0x22 or 0x30 or 0x32 or 0x34 or 0x36 => ExplicitMarkerKind.CueOut,
+            0x23 or 0x31 or 0x33 or 0x35 or 0x37 => ExplicitMarkerKind.CueIn,
+            _ => null,
+        };
+        if (kind.HasValue) pendingSignals.Add((eventId, new ExplicitMarkerSignal(kind.Value, observedAt)));
     }
 
     private static void TryParseSpliceInsert(byte[] data, int startIndex, int commandEnd, ulong ptsAdjustment, List<(uint EventId, ExplicitMarkerSignal Signal)> pendingSignals, HashSet<uint> canceledEventIds)

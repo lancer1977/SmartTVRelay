@@ -22,6 +22,7 @@ public class Scte35FixtureGenerator
     {
         var outputPath = args.Length > 0 ? args[0] : "scte35-sample.ts";
         GenerateFixture(outputPath);
+        GenerateIssue124Fixtures(Path.GetDirectoryName(Path.GetFullPath(outputPath))!);
         Console.WriteLine($"Generated synthetic SCTE-35 fixture at {outputPath}");
     }
 
@@ -39,6 +40,27 @@ public class Scte35FixtureGenerator
         WriteSpliceInsert(writer, cueOut: false, ptsTime: 180000);
 
         writer.Flush();
+    }
+
+    /// <summary>Writes the three broadcast sections transcribed in issue #124 on SCTE-35 PID 87.</summary>
+    public static void GenerateIssue124Fixtures(string outputDirectory)
+    {
+        Directory.CreateDirectory(outputDirectory);
+        string[] sections =
+        {
+            "fc302d00000000000000fff00506ffa79f5fa10017021543554549000002027fff000014a528010131360000daf67457",
+            "fc302d00000000000000fff00506ffa88277d50017021543554549000002037fff000014a5280101313600005c630041",
+            "fc302800000000000000fff00506ffa897168b0012021043554549000002037fbf010131370000d2d37728",
+        };
+        string[] names = { "scte35-time-signal-202-36.ts", "scte35-time-signal-203-36.ts", "scte35-time-signal-203-37.ts" };
+        for (int i = 0; i < sections.Length; i++)
+        {
+            using var fs = File.Create(Path.Combine(outputDirectory, names[i]));
+            using var writer = new BinaryWriter(fs);
+            WritePat(writer);
+            WritePmt(writer, 87);
+            WriteSection(writer, 87, Convert.FromHexString(sections[i]));
+        }
     }
 
     /// <summary>
@@ -80,6 +102,9 @@ public class Scte35FixtureGenerator
     }
 
     private static void WritePmt(BinaryWriter writer)
+        => WritePmt(writer, SCTE35_PID);
+
+    private static void WritePmt(BinaryWriter writer, int scte35Pid)
     {
         var body = new List<byte>
         {
@@ -91,7 +116,7 @@ public class Scte35FixtureGenerator
             0xF0, 0x00,             // reserved(1111) + program_info_length = 0
             // Elementary stream: SCTE-35 (stream_type 0x86)
             0x86,
-            (byte)(0xE0 | ((SCTE35_PID >> 8) & 0x1F)), (byte)(SCTE35_PID & 0xFF),
+            (byte)(0xE0 | ((scte35Pid >> 8) & 0x1F)), (byte)(scte35Pid & 0xFF),
             0xF0, 0x00,             // reserved(1111) + ES_info_length = 0
             0x00, 0x00, 0x00, 0x00, // CRC_32
         };

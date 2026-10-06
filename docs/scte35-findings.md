@@ -11,7 +11,11 @@ A minimal in-repo binary parser for SCTE-35 (ANSI/SCTE 35) splice markers in MPE
 transport streams, with no external CLI dependencies or NuGet packages.
 
 - Locates SCTE-35 streams in the PMT by `stream_type` 0x86
-- Extracts `splice_insert` commands (`splice_command_type` 0x05)
+- Extracts `splice_insert` commands (`splice_command_type` 0x05) and `time_signal` commands
+  (0x06) carrying CUEI `segmentation_descriptor` (tag 0x02)
+- Explicitly maps Break (0x22/0x23), Provider Advertisement (0x30/0x31), Distributor
+  Advertisement (0x32/0x33), Provider Placement Opportunity (0x34/0x35), and Distributor
+  Placement Opportunity (0x36/0x37); unknown segmentation types are ignored
 - Decodes `out_of_network_indicator` to distinguish CueOut (ad break start) vs CueIn (ad break end)
 - Extracts PTS-based timestamps and converts to `DateTimeOffset` using the 90kHz domain formula
 - Graceful error handling: returns an empty list on malformed files, missing streams, or any
@@ -229,7 +233,8 @@ tests: `Extract_TransportErrorIndicatorSet_DiscardsCorruptedPacketWithoutEmittin
 1. **No CRC validation** -- sections are parsed but `CRC_32` is not verified.
 2. **No `encrypted_packet` support** -- encrypted sections are skipped safely (no signal emitted).
 3. **No component-splice-per-PID** -- only program-splice (`program_splice_flag=1`) is handled.
-4. **No duration/avail fields** -- descriptors beyond the `splice_insert` command itself are ignored.
+4. **No duration/avail fields** -- segmentation duration is parsed structurally but the marker
+   uses the command PTS; avail fields remain unsupported.
 5. **Immediate splices (`splice_immediate_flag=1`) and unspecified `splice_time()`
    (`time_specified_flag=0`)** -- no timestamp is present in the section at all in either case;
    the extractor emits **no signal** for these rather than a fabricated one (see "Bugs found and
@@ -237,13 +242,29 @@ tests: `Extract_TransportErrorIndicatorSet_DiscardsCorruptedPacketWithoutEmittin
    not the actual broadcast time for a recorded file). A pipeline that needs immediate-splice
    timing specifically would need to track the packet's own source position/PCR baseline, which
    this prototype does not do.
-6. **No other `splice_command_type`s** -- `time_signal`, `bandwidth_reservation`,
-   `private_command`, etc. are silently ignored (no signal emitted, no error).
+6. **Other `splice_command_type`s** -- `bandwidth_reservation`, `private_command`, etc. remain
+   silently ignored. `time_signal` requires a specified PTS and recognized CUEI descriptor.
 7. **PTS-domain timestamps, not wall-clock.** `pts_time` is in the stream's own 90kHz PTS/PCR
    clock domain, not wall-clock time. The `DateTimeOffset.UnixEpoch + pts_time/90000` formula
    (matching the pattern already used for pts-like values in `FrameAudioSampler.cs` and
    `TransportStreamInspector.cs`) is a reference-frame approximation, not a real timestamp,
    unless the caller tracks the stream's own PCR baseline separately.
+
+## Issue #124: OTA time_signal segmentation descriptors
+
+The three raw broadcast sections from issue #124 are checked in as synthetic transport-stream
+fixtures on SCTE-35 PID 87 (`scte35-time-signal-202-36.ts`, `scte35-time-signal-203-36.ts`,
+`scte35-time-signal-203-37.ts`). Expected kinds and PTS values are independently decoded by
+hand from the section bytes and SCTE-35 field layout, not computed by the fixture generator.
+The 0x203 start/end pair is approximately 15 seconds apart. Event 0x202 has no observed End;
+the existing Viewer `MaxMarkerHoldSeconds` expiry remains its safety boundary. The Viewer still
+waits until raw transport PCR reaches a marker's PTS before using it; extraction does not switch
+the stream directly.
+
+For `time_signal`, timestamps use `(pts_time + pts_adjustment) mod 2^33`. Descriptor cancellation
+suppresses its event. Optional segmentation duration is consumed but does not replace the
+command PTS. Component descriptors, non-CUEI descriptors, and unknown segmentation types emit no
+signals.
 
 ## Real-Capture Validation
 
