@@ -168,3 +168,27 @@ public sealed class ViewerTests : IDisposable
         });
     }
 }
+
+public sealed class WorkDirSweepTests
+{
+    [Fact]
+    public async Task StartAsync_RemovesStaleChannelDirsButNotOtherFiles()
+    {
+        var work = Path.Combine(AppContext.BaseDirectory, "sweep-" + Guid.NewGuid().ToString("N"));
+        var stale = Path.Combine(work, "ch-2.1-deadbeef");
+        Directory.CreateDirectory(stale);
+        File.WriteAllText(Path.Combine(stale, "raw-0.ts"), "x");
+        File.WriteAllText(Path.Combine(work, "keep.txt"), "x");
+        try
+        {
+            var opts = Microsoft.Extensions.Options.Options.Create(new ViewerOptions { WorkDir = work });
+            var tuner = Microsoft.Extensions.Options.Options.Create(new TunerOptions());
+            using var mgr = new ChannelPipelineManager(new FakeRunner(), opts, tuner, TimeProvider.System);
+            await mgr.StartAsync(CancellationToken.None);
+            await mgr.StopAsync(CancellationToken.None);
+            Assert.False(Directory.Exists(stale));
+            Assert.True(File.Exists(Path.Combine(work, "keep.txt")));
+        }
+        finally { try { Directory.Delete(work, true); } catch { } }
+    }
+}
