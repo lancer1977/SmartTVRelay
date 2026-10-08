@@ -61,12 +61,21 @@ public sealed class SegmentEvidenceSource(IOptions<ViewerOptions> viewer, IOptio
             var latestPcr = MpegTsClock.FindLastPcrBase(windowFile, timeout.Token);
             if (latestPcr is { } pcr)
             {
-                var due = new Scte35MarkerExtractor().Extract(windowFile, timeout.Token)
+                var reached = new Scte35MarkerExtractor().Extract(windowFile, timeout.Token)
                     .Where(marker => MpegTsClock.HasReached(pcr, MpegTsClock.ToPts(marker.ObservedAt)))
-                    .LastOrDefault();
+                    .ToArray();
+                var due = reached.LastOrDefault();
+                // A CueOut and a CueIn at the same PTS contradict each other; "last" would only be
+                // file order. Never pick one: report no marker evidence (fail open).
+                var contradictory = due is not null && reached.Any(m =>
+                    m.Kind != due.Kind && MpegTsClock.ToPts(m.ObservedAt) == MpegTsClock.ToPts(due.ObservedAt));
                 lock (_gate)
                 {
-                    if (due is not null)
+                    if (contradictory)
+                    {
+                        _markers.Remove(guideNumber);
+                    }
+                    else if (due is not null)
                     {
                         var pts = MpegTsClock.ToPts(due.ObservedAt);
                         if (!_markers.TryGetValue(guideNumber, out var previous)
