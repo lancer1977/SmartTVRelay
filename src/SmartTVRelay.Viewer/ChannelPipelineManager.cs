@@ -135,8 +135,20 @@ public sealed partial class ChannelPipelineManager : IChannelPipelineRegistry, I
         try { if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true); } catch { /* best effort */ }
     }
 
+    /// <summary>Removes leftover ch-* work directories from a previous crashed run (WorkDir is private to this service).</summary>
+    private void SweepStaleWorkDirs()
+    {
+        try
+        {
+            if (!Directory.Exists(_viewer.WorkDir)) return;
+            foreach (var d in Directory.EnumerateDirectories(_viewer.WorkDir, "ch-*")) TryDelete(d);
+        }
+        catch { /* best effort */ }
+    }
+
     public Task StartAsync(CancellationToken cancellationToken)
     {
+        SweepStaleWorkDirs();
         var period = TimeSpan.FromSeconds(Math.Max(1, Math.Min(5, _viewer.IdleSeconds / 3.0)));
         _timer = _time.CreateTimer(_ => ReapIdle(), null, period, period);
         return Task.CompletedTask;
