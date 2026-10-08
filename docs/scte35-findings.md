@@ -303,3 +303,16 @@ above, that path is now confirmed to walk the real PMT correctly rather than fai
 `dotnet build SmartTVRelay.slnx -c Release` -- 0 warnings, 0 errors.
 `dotnet test SmartTVRelay.slnx -c Release` -- 186/186 passing (182 prior + 4 new for the third
 re-review round), stable across 4 repeated runs.
+
+## Viewer state proof, offline (#123)
+- `Scte35CommercialStateProofTests` drives hand-encoded spec fixtures (`splice_insert` and
+  `time_signal` + segmentation) through `SegmentEvidenceSource` and `GET /api/channels/{n}/state`:
+  `Commercial` only inside the break, `Unknown` on missing, stale, cancelled or contradictory evidence.
+- Fix found by that proof: a CueOut and CueIn at the same PTS used to resolve by file order (and
+  could report `Commercial`). They now report no marker evidence (fail open).
+- Real OTA prescan, 2026-10-07: of 76 lineup channels, one (5.1 WLWT-HD) declares a `stream_type`
+  0x86 PID, and a 5-minute capture saw zero packets on it. No channel produced a splice section,
+  so no real-broadcast proof exists on this antenna. 15 channels returned no data and were not
+  retried. Owner decision 2026-10-08: the offline proof closes #123's proof criterion.
+- Not covered: a cue leaving the 3-segment window while the held marker keeps state (up to the 120 s
+  hold), and the ffmpeg video/black-frame path.
