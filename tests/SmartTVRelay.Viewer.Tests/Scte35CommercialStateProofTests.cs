@@ -185,7 +185,7 @@ public sealed class Scte35CommercialStateProofTests : IDisposable
     }
 
     [Fact]
-    public async Task The_break_boundary_is_the_cue_PTS_not_arrival_order()
+    public async Task The_break_boundary_is_the_cue_PTS_for_cues_announced_ahead_of_time()
     {
         await StartAsync();
         WriteRaw(Psi(PmtWithScte35), PcrPacket(0), Cues(SpliceInsertCueOut, SpliceInsertCueIn));
@@ -199,6 +199,25 @@ public sealed class Scte35CommercialStateProofTests : IDisposable
         Assert.Equal("Commercial", StateOf(await ObserveAsync(TimeSpan.FromSeconds(29))));
         WriteRaw(PcrPacket(Pts40s));
         Assert.Equal("Program", StateOf(await ObserveAsync(TimeSpan.FromMilliseconds(1))));
+    }
+
+    [Fact]
+    public async Task Latest_cue_is_chosen_by_PTS_not_file_order_CueIn_listed_before_CueOut()
+    {
+        await StartAsync();
+        // File order [CueIn@40s, CueOut@10s]; PCR 41 s has reached both. The latest by PTS is CueIn.
+        WriteRaw(Psi(PmtWithScte35), PcrPacket(41 * 90_000L), Cues(SpliceInsertCueIn, SpliceInsertCueOut));
+        var json = await ObserveAsync(TimeSpan.Zero);
+        Assert.NotEqual("Commercial", StateOf(json));
+        Assert.Equal("Program", StateOf(json));
+    }
+
+    [Fact]
+    public async Task Latest_cue_is_chosen_by_PTS_not_file_order_CueOut_listed_before_CueIn()
+    {
+        await StartAsync();
+        WriteRaw(Psi(PmtWithScte35), PcrPacket(41 * 90_000L), Cues(SpliceInsertCueOut, SpliceInsertCueIn));
+        Assert.Equal("Program", StateOf(await ObserveAsync(TimeSpan.Zero)));
     }
 
     // ---- missing evidence -----------------------------------------------------------------------
@@ -302,6 +321,17 @@ public sealed class Scte35CommercialStateProofTests : IDisposable
     }
 
     [Fact]
+    public async Task Same_PTS_tie_at_the_latest_instant_stays_safe_even_with_an_earlier_CueOut_in_the_window()
+    {
+        await StartAsync();
+        // event 3: a CueOut at 8 s, earlier than the contradictory 10 s CueOut/CueIn pair.
+        const string cueInAt10s = "fc3020000000000000fffff00f05000000027f4ffe000dbba000010000000030dcf2f5";
+        const string cueOutAt8s = "fc3025000000000000fffff01405000000037feffe000afc80fe002932e0000100000000d731548e";
+        WriteRaw(Psi(PmtWithScte35), PcrPacket(0), Cues(SpliceInsertCueOut, cueInAt10s, cueOutAt8s));
+        AssertUnknownWithNoMarkerEvidence(await StateAtAsync(12, TimeSpan.FromSeconds(12)));
+    }
+
+    [Fact]
     public async Task Disputed_by_a_competing_detector_is_Unknown_with_provenance_kept()
     {
         await StartAsync((inner, time) => new DisputingSource(inner, time));
@@ -321,6 +351,7 @@ public sealed class Scte35CommercialStateProofTests : IDisposable
     [InlineData(PmtWithScte35)]
     [InlineData(PmtVideoOnly)]
     [InlineData(SpliceInsertCueOut)]
+    [InlineData("fc3025000000000000fffff01405000000037feffe000afc80fe002932e0000100000000d731548e")]
     [InlineData(SpliceInsertCueIn)]
     [InlineData(SpliceInsertCancelEvent1)]
     [InlineData(TimeSignalStart)]

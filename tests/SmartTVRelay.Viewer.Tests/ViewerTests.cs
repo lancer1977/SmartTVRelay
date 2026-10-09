@@ -175,7 +175,7 @@ public sealed class WorkDirSweepTests
     public async Task StartAsync_RemovesStaleChannelDirsButNotOtherFiles()
     {
         var work = Path.Combine(AppContext.BaseDirectory, "sweep-" + Guid.NewGuid().ToString("N"));
-        var stale = Path.Combine(work, "ch-2.1-deadbeef");
+        var stale = Path.Combine(work, "ch-2.1-" + new string('a', 32));
         Directory.CreateDirectory(stale);
         File.WriteAllText(Path.Combine(stale, "raw-0.ts"), "x");
         File.WriteAllText(Path.Combine(work, "keep.txt"), "x");
@@ -190,5 +190,63 @@ public sealed class WorkDirSweepTests
             Assert.True(File.Exists(Path.Combine(work, "keep.txt")));
         }
         finally { try { Directory.Delete(work, true); } catch { } }
+    }
+
+    private static async Task StartStopAsync(string work)
+    {
+        var opts = Microsoft.Extensions.Options.Options.Create(new ViewerOptions { WorkDir = work });
+        var tuner = Microsoft.Extensions.Options.Options.Create(new TunerOptions());
+        using var mgr = new ChannelPipelineManager(new FakeRunner(), opts, tuner, TimeProvider.System);
+        await mgr.StartAsync(CancellationToken.None);
+        await mgr.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task Sweep_keeps_nonmatching_dirs_and_sibling_files()
+    {
+        var work = Path.Combine(AppContext.BaseDirectory, "sweep-" + Guid.NewGuid().ToString("N"));
+        var foo = Path.Combine(work, "ch-foo");
+        var shortHex = Path.Combine(work, "ch-2.1-deadbeef");
+        var upper = Path.Combine(work, "ch-2.1-" + new string('A', 32));
+        var fileLike = Path.Combine(work, "ch-2.1-" + new string('b', 32));
+        foreach (var d in new[] { foo, shortHex, upper }) Directory.CreateDirectory(d);
+        File.WriteAllText(fileLike, "x");
+        try
+        {
+            await StartStopAsync(work);
+            Assert.True(Directory.Exists(foo));
+            Assert.True(Directory.Exists(shortHex));
+            Assert.True(Directory.Exists(upper));
+            Assert.True(File.Exists(fileLike));
+        }
+        finally { try { Directory.Delete(work, true); } catch { } }
+    }
+
+    [Fact]
+    public async Task Sweep_removes_only_the_link_of_a_symlinked_ch_dir()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        var root = Path.Combine(AppContext.BaseDirectory, "sweep-" + Guid.NewGuid().ToString("N"));
+        var work = Path.Combine(root, "work");
+        var target = Path.Combine(root, "precious");
+        Directory.CreateDirectory(work);
+        Directory.CreateDirectory(target);
+        File.WriteAllText(Path.Combine(target, "keep.txt"), "x");
+        var link = Path.Combine(work, "ch-2.1-" + new string('c', 32));
+        Directory.CreateSymbolicLink(link, target);
+        try
+        {
+            await StartStopAsync(work);
+            Assert.False(Directory.Exists(link));
+            Assert.True(File.Exists(Path.Combine(target, "keep.txt")));
+        }
+        finally { try { Directory.Delete(root, true); } catch { } }
+    }
+
+    [Fact]
+    public async Task Sweep_refuses_a_filesystem_root_work_dir_without_throwing()
+    {
+        var root = Path.GetPathRoot(AppContext.BaseDirectory)!;
+        await StartStopAsync(root); // must not delete anything (nothing matches anyway) and must not throw
     }
 }

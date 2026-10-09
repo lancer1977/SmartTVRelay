@@ -64,9 +64,15 @@ public sealed class SegmentEvidenceSource(IOptions<ViewerOptions> viewer, IOptio
                 var reached = new Scte35MarkerExtractor().Extract(windowFile, timeout.Token)
                     .Where(marker => MpegTsClock.HasReached(pcr, MpegTsClock.ToPts(marker.ObservedAt)))
                     .ToArray();
-                var due = reached.LastOrDefault();
-                // A CueOut and a CueIn at the same PTS contradict each other; "last" would only be
-                // file order. Never pick one: report no marker evidence (fail open).
+                // `due` is the reached marker with the highest PTS in the same modular (33-bit)
+                // order MpegTsClock.HasReached uses, never file/arrival order: every reached
+                // marker is at or behind the PCR, so the latest one is the smallest distance to it.
+                var due = reached.Length == 0 ? null
+                    : reached.MinBy(m => MpegTsClock.DistanceBehind(pcr, MpegTsClock.ToPts(m.ObservedAt)));
+                // A CueOut and a CueIn at the same PTS contradict each other; neither can be
+                // preferred. Never pick one: report no marker evidence (fail open). Recall tradeoff:
+                // a legitimate ad-end (0x33) plus the next ad-start (0x32) at one splice point lands
+                // here too and yields Unknown (safe, costs recall); see docs/scte35-findings.md.
                 var contradictory = due is not null && reached.Any(m =>
                     m.Kind != due.Kind && MpegTsClock.ToPts(m.ObservedAt) == MpegTsClock.ToPts(due.ObservedAt));
                 lock (_gate)

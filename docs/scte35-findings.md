@@ -310,6 +310,11 @@ re-review round), stable across 4 repeated runs.
   `Commercial` only inside the break, `Unknown` on missing, stale, cancelled or contradictory evidence.
 - Fix found by that proof: a CueOut and CueIn at the same PTS used to resolve by file order (and
   could report `Commercial`). They now report no marker evidence (fail open).
+- The "due" marker is the reached marker with the highest PTS in modular (33-bit) order, not file
+  order (#128): a window `[CueIn@40s, CueOut@10s]` at PCR 41 s reports `Program`, not `Commercial`.
+- Same-PTS recall tradeoff (#128): a legitimate ad-end (0x33) and the next ad-start (0x32) at one
+  splice point share a PTS, are treated as contradictory, and yield `Unknown`. This is safe (the
+  original broadcast is kept) but costs recall at back-to-back ad boundaries.
 - Real OTA prescan, 2026-10-07: of 76 lineup channels, one (5.1 WLWT-HD) declares a `stream_type`
   0x86 PID, and a 5-minute capture saw zero packets on it. No channel produced a splice section,
   so no real-broadcast proof exists on this antenna. 15 channels returned no data and were not
