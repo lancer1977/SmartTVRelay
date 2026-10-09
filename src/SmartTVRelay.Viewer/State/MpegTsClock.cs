@@ -101,6 +101,9 @@ public static class MpegTsClock
         return distance < HalfClockRange;
     }
 
+    /// <summary>Modular (33-bit) distance in ticks from a target PTS forward to the current clock; smaller means more recent.</summary>
+    public static long DistanceBehind(long currentPcrBase, long targetPts) => (currentPcrBase - targetPts) & ClockMask;
+
     /// <summary>Converts the SCTE extractor's UnixEpoch-relative marker time to a 33-bit PTS.</summary>
     public static long ToPts(DateTimeOffset markerObservedAt)
     {

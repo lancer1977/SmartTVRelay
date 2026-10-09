@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Text.RegularExpressions;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace SmartTVRelay.Viewer;
@@ -25,11 +26,13 @@ public sealed partial class ChannelPipelineManager : IChannelPipelineRegistry, I
     private readonly ViewerOptions _viewer;
     private readonly TunerOptions _tuner;
     private readonly TimeProvider _time;
+    private readonly ILogger<ChannelPipelineManager>? _logger;
     private ITimer? _timer;
 
     public ChannelPipelineManager(IFfmpegRunner runner, IOptions<ViewerOptions> viewer,
-        IOptions<TunerOptions> tuner, TimeProvider time)
+        IOptions<TunerOptions> tuner, TimeProvider time, ILogger<ChannelPipelineManager>? logger = null)
     {
+        _logger = logger;
         _runner = runner;
         _viewer = viewer.Value;
         _tuner = tuner.Value;
@@ -135,15 +138,39 @@ public sealed partial class ChannelPipelineManager : IChannelPipelineRegistry, I
         try { if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true); } catch { /* best effort */ }
     }
 
-    /// <summary>Removes leftover ch-* work directories from a previous crashed run (WorkDir is private to this service).</summary>
+    [GeneratedRegex(@"^ch-[0-9.]+-[0-9a-f]{32}$")]
+    private static partial Regex StaleWorkDirPattern();
+
+    /// <summary>
+    /// Removes leftover work directories (exactly <c>ch-{guide}-{32 hex}</c>) from a previous crashed run.
+    /// Refuses to sweep when WorkDir is a filesystem root or the user's home. A symlinked entry
+    /// is unlinked, never followed.
+    /// </summary>
     private void SweepStaleWorkDirs()
     {
         try
         {
-            if (!Directory.Exists(_viewer.WorkDir)) return;
-            foreach (var d in Directory.EnumerateDirectories(_viewer.WorkDir, "ch-*")) TryDelete(d);
+            if (string.IsNullOrWhiteSpace(_viewer.WorkDir) || !Directory.Exists(_viewer.WorkDir)) return;
+            var full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(_viewer.WorkDir));
+            var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            if (full.Length == 0 || Path.GetPathRoot(full) == full + Path.DirectorySeparatorChar || Path.GetPathRoot(full) == full
+                || (!string.IsNullOrEmpty(home) && string.Equals(full, Path.TrimEndingDirectorySeparator(Path.GetFullPath(home)), StringComparison.Ordinal)))
+            {
+                _logger?.LogWarning("Refusing to sweep stale work dirs: Viewer:WorkDir {WorkDir} is a filesystem root or home directory", _viewer.WorkDir);
+                return;
+            }
+
+            foreach (var d in Directory.EnumerateDirectories(_viewer.WorkDir, "ch-*"))
+            {
+                if (!StaleWorkDirPattern().IsMatch(Path.GetFileName(d))) continue;
+                if (new DirectoryInfo(d).LinkTarget is not null) File.Delete(d); // unlink only; never follow
+                else TryDelete(d);
+            }
         }
-        catch { /* best effort */ }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "Stale work dir sweep failed for {WorkDir}", _viewer.WorkDir);
+        }
     }
 
     public Task StartAsync(CancellationToken cancellationToken)

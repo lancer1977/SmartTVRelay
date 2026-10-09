@@ -53,3 +53,42 @@ it to Portainer. Keep the prior image digest for rollback. Do not activate Dread
 channel config until the private service is healthy and exact-image HLS smoke
 has passed. Publishing the image, changing live configuration, and deployment
 are separate approval gates.
+
+## Network exposure note
+
+The Viewer has no authentication of its own. Any task attached to the shared
+`dreadtv-egress` overlay (and any task on `dreadtv-internal`) can reach
+`smarttvrelay-internal:5189`, including `/api/channels`, HLS, and `/healthz`.
+Only attach trusted services to those overlays; DreadTV is the sole intended
+viewer-facing boundary.
+
+## Rollback procedure
+
+Keep the previous immutable image digest (`name@sha256:...`) from the last
+good deploy before every update.
+
+1. Preferred, redeploy the previous digest through the stack. Set
+   `SMARTTV_VIEWER_IMAGE` to the prior `name@sha256:...`, run
+   `scripts/validate-private-swarm.sh`, and update the Portainer stack with
+   that value. The one-replica, stop-first policy means the old tuner owner
+   stops before the older image starts.
+2. Fast path, on a manager node: `docker service rollback <stack>_smarttvrelay-viewer`
+   reverts the service to its previous spec (uses `rollback_config`, stop-first).
+   Afterwards set the stack's `SMARTTV_VIEWER_IMAGE` back to the same prior
+   digest so the next stack update does not re-apply the bad one.
+3. First deploy (no previous digest exists): remove the stack
+   (`docker stack rm <stack>`, or delete it in Portainer) and leave DreadTV's
+   `smarttv-hdhomerun` channel config inactive. Nothing else depends on the
+   service, and removal frees the tuner immediately.
+
+After any rollback, confirm `/healthz` and one exact-image HLS playlist before
+re-activating DreadTV's channel config.
+
+## Base image pinning and open items
+
+`Dockerfile` pins both base images by tag and digest (resolved read-only with
+`docker buildx imagetools inspect` on 2026-10-08; these are multi-arch index
+digests). Refresh them deliberately to pick up base-image security updates.
+Still open (needs an authorized image publish): confirm the container
+`HEALTHCHECK` reaches healthy and render the stack with a published
+digest-pinned image.
