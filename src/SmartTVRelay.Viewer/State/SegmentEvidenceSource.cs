@@ -9,7 +9,8 @@ namespace SmartTVRelay.Viewer.State;
 /// Analyses completed raw tuner MPEG-TS windows. The HLS transcode is never used as detector
 /// input: it can discard SCTE-35 and other original-stream evidence. A marker is applied only
 /// after its PTS is reached by the transport PCR, and is held briefly while fresh raw data
-/// continues. Missing timing or stale capture yields no marker evidence.
+/// continues. Missing timing or stale capture yields no marker evidence. Black-frame and
+/// audio-loudness detectors also run over the same window as corroborating evidence.
 /// </summary>
 public sealed class SegmentEvidenceSource(IOptions<ViewerOptions> viewer, IOptions<ChannelStateOptions> state, TimeProvider time)
     : IChannelEvidenceSource
@@ -121,6 +122,24 @@ public sealed class SegmentEvidenceSource(IOptions<ViewerOptions> viewer, IOptio
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
             catch (Exception) { /* marker observations remain valid; video evidence is omitted */ }
+
+            // Loudness is weak evidence like black frames: it corroborates but cannot authorize
+            // Commercial alone, and a sampler failure leaves the other observations intact.
+            try
+            {
+                var levels = new List<AudioLoudnessSample>();
+                await foreach (var sample in new FrameAudioSampler(viewer.Value.FfmpegPath).SampleAudioAsync(
+                    windowFile, new SamplingOptions(VideoEnabled: false), timeout.Token))
+                    levels.Add(sample);
+                if (levels.Count > 0)
+                {
+                    var end = levels[^1].CapturedAt;
+                    var anchored = levels.Select(sample => sample with { CapturedAt = now - (end - sample.CapturedAt) }).ToArray();
+                    observations.AddRange(new AudioLoudnessDetector().Detect(sourceId, anchored));
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+            catch (Exception) { /* other observations remain valid; audio evidence is omitted */ }
 
             lock (_gate) _last[guideNumber] = (key, observations);
             return observations;
