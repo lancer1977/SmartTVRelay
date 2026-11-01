@@ -8,7 +8,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using Xunit;
 
-[Collection("Subprocess")]
 public class TransportStreamInspectorTests
 {
     /// <summary>Fixture file path using AppContext.BaseDirectory for test output directory.</summary>
