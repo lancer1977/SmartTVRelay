@@ -1,0 +1,26 @@
+schema_version: 2
+merge_policy:
+  integration_branch: dev
+  protected_branch: main
+  required_checks:
+    - "build"
+  test_tiers:
+    unit:
+      command: "dotnet test SmartTVRelay.slnx -c Release"
+      required_for: [dev, main]
+    integration:
+      command: "dotnet build SmartTVRelay.slnx -c Release"
+      required_for: [dev, main]
+    automation:
+      command: "dotnet run --project src/SmartTVRelay.Evaluation -c Release"
+      required_for: [dev, main]
+  escalate_paths:
+    - "**/*secret*"
+    - "**/*credential*"
+    - "**/*auth*"
+    - ".github/workflows/**"
+    - "**/*infra*"
+    - "**/*deploy*"
+  escalate_labels:
+    - decision
+    - bug
